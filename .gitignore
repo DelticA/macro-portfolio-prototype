@@ -1,0 +1,5 @@
+.env
+.env.secrets
+data/live_run/
+__pycache__/
+.pytest_cache/
