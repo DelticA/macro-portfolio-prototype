@@ -16,6 +16,47 @@ Run tests:
 PYTHONPATH=src pytest
 ```
 
+## Macro Portfolio Lab 2.0
+
+2.0 adds a step-by-step research workbench on top of the original pipeline. It is designed for quant research, so every stage keeps its own artifacts, logs, previews, and configuration inside `runs/<run_id>/`.
+
+Main ideas:
+- each experiment gets a dedicated `run_id`
+- each stage writes artifacts under its own folder
+- the backend exposes separate endpoints for `providers`, `data`, `regime`, `policy`, and `backtest`
+- regime and policy models now have pluggable adapters, so clustering and ML models can be added without rewriting the UI
+
+Start the local lab API:
+
+```bash
+PYTHONPATH=src python3 -m uvicorn macro_portfolio.api.app:app --host 127.0.0.1 --port 8010
+```
+
+Then open:
+
+- [http://127.0.0.1:8010/](http://127.0.0.1:8010/)
+
+Current built-in models:
+- Regime:
+  - `rule_based`
+  - `kmeans`
+  - `gmm`
+- Policy:
+  - `template_rule`
+  - `risk_parity`
+  - `cvar`
+
+Example API flow:
+
+```bash
+curl -X POST http://127.0.0.1:8010/api/runs -H 'Content-Type: application/json' -d '{"label":"research run"}'
+curl -X POST http://127.0.0.1:8010/api/runs/<run_id>/providers -H 'Content-Type: application/json' -d '{"start_date":"2018-01-01","end_date":"2026-03-17"}'
+curl -X POST http://127.0.0.1:8010/api/runs/<run_id>/data -H 'Content-Type: application/json' -d '{}'
+curl -X POST http://127.0.0.1:8010/api/runs/<run_id>/regime -H 'Content-Type: application/json' -d '{"model_name":"rule_based"}'
+curl -X POST http://127.0.0.1:8010/api/runs/<run_id>/policy -H 'Content-Type: application/json' -d '{"model_name":"cvar"}'
+curl -X POST http://127.0.0.1:8010/api/runs/<run_id>/backtest -H 'Content-Type: application/json' -d '{"model_name":"cvar"}'
+```
+
 ## Real Data Setup
 
 ### Free / no-key by default

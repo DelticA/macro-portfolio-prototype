@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Macro Portfolio Lab 2.0</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260318b" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Macro Portfolio Lab 2.0</p>
+          <h1>量化研究工作台</h1>
+          <p>按阶段分页面推进。当前先把“数据获取”页做成可展开菜单、可单项更新、可一键全量拉取的研究入口。</p>
+        </div>
+        <div class="hero-actions">
+          <button id="create-run">创建新实验</button>
+          <select id="run-select"></select>
+        </div>
+      </header>
+
+      <nav class="tab-nav">
+        <button class="tab-button active" data-tab="providers-page">1. 数据获取</button>
+        <button class="tab-button" data-tab="data-page">2. 数据处理</button>
+        <button class="tab-button" data-tab="regime-page">3. 状态识别</button>
+        <button class="tab-button" data-tab="policy-page">4. 策略决策</button>
+        <button class="tab-button" data-tab="backtest-page">5. 回测分析</button>
+      </nav>
+
+      <section id="providers-page" class="page active">
+        <div class="page-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Page 1</p>
+                <h2>数据获取</h2>
+              </div>
+              <button id="run-providers">一键拉取 / 更新</button>
+            </div>
+
+            <div class="form-grid">
+              <label>开始日期<input id="providers-start-date" value="2018-01-01" /></label>
+              <label>结束日期<input id="providers-end-date" value="2026-03-17" /></label>
+              <label>FRED API KEY
+                <input id="fred-api-key" placeholder="若环境中已有则自动填写" />
+              </label>
+              <div class="hint-box">
+                <strong>API 自动填写</strong>
+                <div>如果环境变量或 `.env.secrets` 中已存在 `FRED_API_KEY`，页面会自动填入。</div>
+              </div>
+            </div>
+
+            <div class="form-grid compact-grid">
+              <label>沪深300 ETF 代码<input id="csi300-code" value="510300.SH" /></label>
+              <label>科创50 ETF 代码<input id="star50-code" value="588000.SH" /></label>
+              <label>中国国债 ETF 代码<input id="cgb-code" value="511010.SH" /></label>
+            </div>
+
+            <div id="providers-tree" class="accordion-stack">
+              <div class="hint-box">正在加载数据菜单...</div>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Run Status</p>
+                <h2>拉取结果</h2>
+              </div>
+            </div>
+            <div id="providers-status" class="status-line"></div>
+            <div id="providers-results" class="group-results"></div>
+            <pre id="providers-log" class="stage-log"></pre>
+            <div id="providers-preview" class="stage-preview"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="data-page" class="page"><article class="panel placeholder-panel"><h2>数据处理</h2><p>下一步单独打磨。</p></article></section>
+      <section id="regime-page" class="page"><article class="panel placeholder-panel"><h2>状态识别</h2><p>下一步单独打磨。</p></article></section>
+      <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
+      <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
+    </main>
+    <script src="/static/app.js?v=20260318b" type="module"></script>
+  </body>
+</html>

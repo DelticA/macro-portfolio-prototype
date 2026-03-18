@@ -1,0 +1,36 @@
+{
+  "model_name": "cvar",
+  "latest_regime": "reflation",
+  "top_weights": [
+    {
+      "asset": "SPY",
+      "target_weight": 0.11251651254953764,
+      "lower_bound": 0.0,
+      "upper_bound": 0.35
+    },
+    {
+      "asset": "QQQ",
+      "target_weight": 0.11251651254953764,
+      "lower_bound": 0.0,
+      "upper_bound": 0.35
+    },
+    {
+      "asset": "TLT",
+      "target_weight": 0.11251651254953764,
+      "lower_bound": 0.0,
+      "upper_bound": 0.35
+    },
+    {
+      "asset": "GLD",
+      "target_weight": 0.11251651254953764,
+      "lower_bound": 0.0,
+      "upper_bound": 0.35
+    },
+    {
+      "asset": "CSI300",
+      "target_weight": 0.11251651254953764,
+      "lower_bound": 0.0,
+      "upper_bound": 0.35
+    }
+  ]
+}

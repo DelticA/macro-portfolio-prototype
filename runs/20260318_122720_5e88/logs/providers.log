@@ -1,0 +1,31 @@
+2026-03-18T12:27:32.621295 Fetching data for 2018-01-01 -> 2026-03-17 | items=tlt,cgb,spy,qqq,csi300,star50,gld,slv,dbc,uso,btc,us_ip,us_payroll,us_unemployment,us_cpi,us_core_cpi,us_m2,us_fed_funds,us_yield_10y,us_yield_2y,us_term_spread,us_breakeven_5y,cn_pmi,cn_cpi,cn_ppi,cn_m2,cn_industrial,cn_gdp,usdcny
+2026-03-18T12:27:33.826052 Fetched tlt
+2026-03-18T12:27:35.220212 Fetched cgb
+2026-03-18T12:27:36.421407 Fetched spy
+2026-03-18T12:27:37.583719 Fetched qqq
+2026-03-18T12:27:38.055042 Fetched csi300
+2026-03-18T12:27:38.554362 Fetched star50
+2026-03-18T12:27:39.710457 Fetched gld
+2026-03-18T12:27:40.907776 Fetched slv
+2026-03-18T12:27:42.081545 Fetched dbc
+2026-03-18T12:27:43.234170 Fetched uso
+2026-03-18T12:27:43.725530 Fetched btc
+2026-03-18T12:27:44.426747 Fetched us_ip
+2026-03-18T12:27:45.135670 Fetched us_payroll
+2026-03-18T12:27:45.822944 Fetched us_unemployment
+2026-03-18T12:27:46.561295 Fetched us_cpi
+2026-03-18T12:27:47.341763 Fetched us_core_cpi
+2026-03-18T12:27:48.092508 Fetched us_m2
+2026-03-18T12:27:48.814445 Fetched us_fed_funds
+2026-03-18T12:27:49.581366 Fetched us_yield_10y
+2026-03-18T12:27:50.282285 Fetched us_yield_2y
+2026-03-18T12:27:51.433720 Fetched us_term_spread
+2026-03-18T12:27:52.509756 Fetched us_breakeven_5y
+2026-03-18T12:28:07.325260 Fetched cn_pmi
+2026-03-18T12:28:22.490238 Fetched cn_cpi
+2026-03-18T12:28:53.763617 Fetched cn_ppi
+2026-03-18T12:29:29.661482 Fetched cn_m2
+2026-03-18T12:29:45.101037 Fetched cn_industrial
+2026-03-18T12:30:00.628453 Fetched cn_gdp
+2026-03-18T12:30:01.760969 Fetched usdcny
+2026-03-18T12:30:01.804835 Provider stage finished successfully

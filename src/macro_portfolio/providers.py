@@ -39,7 +39,9 @@ DEFAULT_YAHOO_SYMBOLS = {
     "QQQ": "QQQ",
     "TLT": "TLT",
     "GLD": "GLD",
+    "SLV": "SLV",
     "DBC": "DBC",
+    "USO": "USO",
 }
 
 DEFAULT_STOOQ_SYMBOLS = {
@@ -47,7 +49,9 @@ DEFAULT_STOOQ_SYMBOLS = {
     "QQQ": "qqq.us",
     "TLT": "tlt.us",
     "GLD": "gld.us",
+    "SLV": "slv.us",
     "DBC": "dbc.us",
+    "USO": "uso.us",
 }
 
 
@@ -172,6 +176,26 @@ class OpenBBClient:
             frames[alias] = df.set_index("date")[value_column].rename(alias)
         return pd.DataFrame(frames).sort_index()
 
+    def fetch_price_history(
+        self,
+        symbol_map: dict[str, str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+        asset_class: str = "equity",
+    ) -> pd.DataFrame:
+        frames = {}
+        command = {
+            "equity": self.obb.equity.price.historical,
+            "crypto": self.obb.crypto.price.historical,
+            "currency": self.obb.currency.price.historical,
+            "index": self.obb.index.price.historical,
+        }[asset_class]
+        for alias, symbol in symbol_map.items():
+            df = command(symbol=symbol, start_date=start_date, end_date=end_date, provider="yfinance").to_df()
+            close_column = "adj_close" if "adj_close" in df.columns else "close"
+            frames[alias] = df.set_index("date")[close_column].rename(alias)
+        return pd.DataFrame(frames).sort_index()
+
 
 @dataclass
 class StooqClient:
@@ -246,7 +270,7 @@ class AkshareClient:
             axis=1,
         ).sort_index().loc[pd.Timestamp(start_date) : pd.Timestamp(end_date)]
 
-    def fetch_cn_macro(self) -> pd.DataFrame:
+    def fetch_cn_macro(self, aliases: list[str] | None = None) -> pd.DataFrame:
         with _disabled_proxy_env():
             series_map = {
                 "pmi": self.ak.macro_china_pmi_yearly(),
@@ -256,29 +280,10 @@ class AkshareClient:
                 "industrial": self.ak.macro_china_industrial_production_yoy(),
                 "gdp": self.ak.macro_china_gdp_yearly(),
             }
+        if aliases:
+            series_map = {alias: frame for alias, frame in series_map.items() if alias in aliases}
         frames = [_akshare_macro_series(frame, alias) for alias, frame in series_map.items()]
         return pd.concat(frames, axis=1).sort_index()
-
-    def fetch_price_history(
-        self,
-        symbol_map: dict[str, str],
-        start_date: str | None = None,
-        end_date: str | None = None,
-        asset_class: str = "equity",
-    ) -> pd.DataFrame:
-        frames = {}
-        command = {
-            "equity": self.obb.equity.price.historical,
-            "crypto": self.obb.crypto.price.historical,
-            "currency": self.obb.currency.price.historical,
-            "index": self.obb.index.price.historical,
-        }[asset_class]
-        for alias, symbol in symbol_map.items():
-            df = command(symbol=symbol, start_date=start_date, end_date=end_date, provider="yfinance").to_df()
-            close_column = "adj_close" if "adj_close" in df.columns else "close"
-            frames[alias] = df.set_index("date")[close_column].rename(alias)
-        return pd.DataFrame(frames).sort_index()
-
 
 @dataclass
 class ResearchDataLoader:
@@ -395,6 +400,15 @@ def _resolve_secret(name: str) -> str | None:
             if key.strip() == name:
                 return value.strip().strip('"').strip("'")
     return None
+
+
+def get_prefilled_secret_fields() -> dict[str, str]:
+    fields = {}
+    for name in ["FRED_API_KEY"]:
+        value = _resolve_secret(name)
+        if value:
+            fields[name] = value
+    return fields
 
 
 @contextmanager
