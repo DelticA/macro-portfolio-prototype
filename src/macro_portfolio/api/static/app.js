@@ -2,6 +2,7 @@ const providerState = {
   tree: [],
   sourceSelections: {},
   itemNodes: {},
+  customItems: [],
 };
 
 const api = {
@@ -31,6 +32,20 @@ const api = {
   },
   async getStage(runId, stage) {
     return handle(await fetch(`/api/runs/${runId}/stages/${stage}`));
+  },
+  async loadProvidersFromRun(runId, sourceRunId) {
+    return handle(
+      await fetch(`/api/runs/${runId}/providers/load?source_run_id=${encodeURIComponent(sourceRunId)}`, {
+        method: "POST",
+      }),
+    );
+  },
+  async openFolder(runId, target) {
+    return handle(
+      await fetch(`/api/runs/${runId}/open?target=${encodeURIComponent(target)}`, {
+        method: "POST",
+      }),
+    );
   },
 };
 
@@ -66,6 +81,40 @@ function bindActions() {
   document.getElementById("run-providers").addEventListener("click", async () => {
     await runProvidersWithItems(null);
   });
+
+  document.getElementById("load-providers-from-run").addEventListener("click", async () => {
+    const runId = currentRunId();
+    const sourceRunId = document.getElementById("providers-copy-source").value;
+    if (!runId || !sourceRunId) {
+      setProvidersStatus("请选择当前实验和要载入的历史实验。");
+      return;
+    }
+    if (runId === sourceRunId) {
+      setProvidersStatus("当前实验和来源实验相同，无需载入。");
+      return;
+    }
+    setProvidersStatus(`正在载入 ${sourceRunId} 的 providers 数据`);
+    try {
+      await api.loadProvidersFromRun(runId, sourceRunId);
+      await renderProviders(runId);
+    } catch (error) {
+      setProvidersStatus(`载入失败: ${error.message}`);
+    }
+  });
+
+  document.getElementById("open-run-folder").addEventListener("click", async () => {
+    await openFolder("run");
+  });
+
+  document.getElementById("open-providers-folder").addEventListener("click", async () => {
+    await openFolder("providers");
+  });
+
+  document.addEventListener("click", (event) => {
+    if (event.target?.id === "add-custom-equity") {
+      addCustomEquity();
+    }
+  });
 }
 
 async function loadProvidersConfig() {
@@ -88,7 +137,15 @@ async function refreshRuns(selectedId = null) {
   const data = await api.getRuns();
   const select = document.getElementById("run-select");
   select.innerHTML = data.items.map((item) => `<option value="${item.run_id}">${item.run_id} · ${item.status}</option>`).join("");
+  const copySelect = document.getElementById("providers-copy-source");
+  copySelect.innerHTML =
+    `<option value="">选择已有实验作为数据来源</option>` +
+    data.items.map((item) => `<option value="${item.run_id}">${item.run_id} · ${item.status}</option>`).join("");
   if (selectedId) select.value = selectedId;
+  if (!copySelect.value && data.items.length > 1) {
+    const fallback = data.items.find((item) => item.run_id !== select.value);
+    if (fallback) copySelect.value = fallback.run_id;
+  }
   if (select.value) await renderProviders(select.value);
 }
 
@@ -114,11 +171,12 @@ function renderProvidersTree() {
                   <section class="sub-accordion-card">
                     <button class="sub-accordion-toggle" data-target="group-${slugify(category.category)}-${slugify(group.group)}" type="button">
                       <span class="accordion-title">${group.group}</span>
-                      <span class="accordion-meta">${group.items.length} 个子类目</span>
+                      <span class="accordion-meta">${groupItems(category, group).length} 个子类目</span>
                       <span class="accordion-chevron">▸</span>
                     </button>
                     <div class="sub-accordion-panel" id="group-${slugify(category.category)}-${slugify(group.group)}">
-                      ${group.items.map((item) => providerItemMarkup(item)).join("")}
+                      ${groupItems(category, group).map((item) => providerItemMarkup(item)).join("")}
+                      ${category.category === "资产数据" && group.group === "股票" ? customEquityControlsMarkup() : ""}
                     </div>
                   </section>
                 `,
@@ -134,7 +192,7 @@ function renderProvidersTree() {
 
   for (const category of providerState.tree) {
     for (const group of category.groups) {
-      for (const item of group.items) {
+      for (const item of groupItems(category, group)) {
         const select = document.getElementById(`source-${item.id}`);
         if (select) {
           select.addEventListener("change", (event) => {
@@ -147,6 +205,7 @@ function renderProvidersTree() {
             await runProvidersWithItems([item.id]);
           });
         }
+        bindCustomItemControls(item);
       }
     }
   }
@@ -173,15 +232,34 @@ function providerItemMarkup(item) {
       <div class="provider-main">
         <div>
           <strong>${item.label}</strong>
+          ${item.supports_openbb ? `<span class="source-badge">OpenBB</span>` : ""}
           <p>字段: ${item.column} · 输出文件: ${item.artifact}</p>
+          <p>原始计价/单位: ${item.quote_unit || "未标注"}</p>
+          ${item.symbol ? `<p>代码: ${item.symbol}</p>` : ""}
         </div>
         <div class="provider-actions">
+          ${item.is_custom ? `
+            <label>股票名称
+              <input id="custom-label-${item.id}" value="${item.label || ""}" />
+            </label>
+            <label>股票代码
+              <input id="custom-symbol-${item.id}" value="${item.symbol || ""}" />
+            </label>
+          ` : ""}
+          ${item.code_field ? `
+            <label>${item.code_label}
+              <input id="code-${item.id}" value="${item.code_value || ""}" />
+            </label>
+          ` : ""}
           <label>来源
             <select id="source-${item.id}" ${item.sources.length === 1 ? "disabled" : ""}>
-              ${item.sources.map((source) => `<option value="${source}">${source}</option>`).join("")}
+              ${item.sources.map((source) => `<option value="${source}">${sourceOptionLabel(source)}</option>`).join("")}
             </select>
           </label>
-          <button class="secondary-button" id="fetch-${item.id}">拉取 / 更新</button>
+          <div class="item-action-row">
+            <button class="secondary-button" id="fetch-${item.id}">拉取 / 更新</button>
+            ${item.is_custom ? `<button class="ghost-button" id="remove-${item.id}" type="button">删除</button>` : ""}
+          </div>
         </div>
       </div>
       <div class="mini-status" id="status-${item.id}">未执行</div>
@@ -209,10 +287,13 @@ function collectProvidersPayload(selectedItems = null) {
     start_date: document.getElementById("providers-start-date").value,
     end_date: document.getElementById("providers-end-date").value,
     fred_api_key: document.getElementById("fred-api-key").value.trim() || null,
-    csi300_code: document.getElementById("csi300-code").value,
-    star50_code: document.getElementById("star50-code").value,
-    cgb_code: document.getElementById("cgb-code").value,
+    csi300_code: document.getElementById("code-csi300")?.value || "510300.SH",
+    star50_code: document.getElementById("code-star50")?.value || "588000.SH",
+    cgb_code: document.getElementById("code-cgb")?.value || "511010.SH",
+    hsi_code: document.getElementById("code-hsi_hk")?.value || "2800.HK",
+    hstech_code: document.getElementById("code-hstech_hk")?.value || "3033.HK",
     selected_items: selectedItems,
+    custom_equities: collectCustomEquities(),
   };
   const fieldValues = {};
   for (const category of providerState.tree) {
@@ -227,10 +308,13 @@ function collectProvidersPayload(selectedItems = null) {
 
 async function renderProviders(runId) {
   const payload = await api.getStage(runId, "providers");
-  setProvidersStatus(`状态: ${payload.status}`);
+  const changed = syncCustomItemsFromSummary(payload.summary?.categories || []);
+  if (changed) {
+    renderProvidersTree();
+  }
+  setProvidersStatus(buildProvidersStatus(payload));
   document.getElementById("providers-log").textContent = payload.log || "";
   renderProviderResults(payload.summary?.categories || []);
-  renderPreview(document.getElementById("providers-preview"), payload.preview || {});
 }
 
 function setProvidersStatus(text) {
@@ -238,77 +322,150 @@ function setProvidersStatus(text) {
 }
 
 function renderProviderResults(groups) {
-  const container = document.getElementById("providers-results");
-  if (!groups.length) {
-    container.innerHTML = "";
-    return;
-  }
+  if (!groups.length) return;
 
   for (const group of groups) {
     for (const item of group.items) {
       const mini = document.getElementById(`status-${item.id}`);
-      if (mini) mini.textContent = `${item.status} · ${item.selected_source}`;
+      if (mini) {
+        const dateRange =
+          item.start && item.end ? ` · 范围 ${item.start} ~ ${item.end}` : "";
+        const frequency = item.frequency ? ` · ${item.frequency}` : "";
+        const updatedAt = item.last_updated ? ` · 上次拉取 ${item.last_updated}` : "";
+        mini.textContent =
+          `${translateStatus(item.status)} · 来源 ${item.selected_source}` +
+          ` · ${item.rows} 行 · ${item.non_null} 非空${frequency}${dateRange}${updatedAt}`;
+        mini.classList.remove("success", "failed", "idle");
+        mini.classList.add(statusClass(item.status));
+      }
     }
   }
-
-  container.innerHTML = groups
-    .map(
-      (group) => `
-        <section class="result-group">
-          <div class="group-head">
-            <h3>${group.category} / ${group.group}</h3>
-          </div>
-          <div class="result-list">
-            ${group.items
-              .map(
-                (item) => `
-                  <div class="result-item ${item.status}">
-                    <div>
-                      <strong>${item.label}</strong>
-                      <p>来源: ${item.selected_source} · 文件: ${item.artifact} · 字段: ${item.column}</p>
-                    </div>
-                    <div class="result-meta">
-                      <span class="pill ${item.status}">${item.status}</span>
-                      <span>${item.rows} rows</span>
-                      <span>${item.non_null} non-null</span>
-                    </div>
-                  </div>
-                `,
-              )
-              .join("")}
-          </div>
-        </section>
-      `,
-    )
-    .join("");
 }
 
-function renderPreview(container, preview) {
-  const entries = Object.entries(preview);
-  if (!entries.length) {
-    container.innerHTML = "";
+function buildProvidersStatus(payload) {
+  const groups = payload.summary?.categories || [];
+  const items = groups.flatMap((group) => group.items || []);
+  if (!items.length) {
+    return `状态: ${payload.status}`;
+  }
+  const successCount = items.filter((item) => item.status === "success").length;
+  const failedCount = items.filter((item) => item.status === "failed").length;
+  const pendingCount = items.filter((item) => item.status === "not_run").length;
+  return `状态: ${payload.status} · 成功 ${successCount}/${items.length}` +
+    (pendingCount ? ` · 未执行 ${pendingCount}` : "") +
+    (failedCount ? ` · 失败 ${failedCount}` : "");
+}
+
+function syncCustomItemsFromSummary(groups) {
+  const summaryCustomItems = groups.flatMap((group) => group.items || []).filter((item) => item.is_custom);
+  const nextCustomItems = summaryCustomItems.map((item) => ({
+    id: item.id,
+    label: item.label,
+    column: item.column,
+    artifact: item.artifact,
+    sources: item.sources || ["yahoo", "openbb"],
+    source_field: "custom_equity_source",
+    quote_unit: item.quote_unit || "USD",
+    symbol: item.symbol || "",
+    is_custom: true,
+    supports_openbb: item.supports_openbb ?? true,
+    selected_source: item.selected_source || (item.sources || ["yahoo"])[0],
+  }));
+  const changed = JSON.stringify(nextCustomItems) !== JSON.stringify(providerState.customItems);
+  if (changed) {
+    providerState.customItems = nextCustomItems;
+    for (const item of providerState.customItems) {
+      providerState.sourceSelections[item.id] = item.selected_source || providerState.sourceSelections[item.id] || item.sources[0];
+    }
+  }
+  return changed;
+}
+
+function translateStatus(status) {
+  if (status === "success") return "成功";
+  if (status === "failed") return "失败";
+  if (status === "not_run") return "未执行";
+  return "未执行";
+}
+
+function statusClass(status) {
+  if (status === "success") return "success";
+  if (status === "failed") return "failed";
+  return "idle";
+}
+
+function groupItems(category, group) {
+  if (category.category === "资产数据" && group.group === "股票") {
+    return [...group.items, ...providerState.customItems];
+  }
+  return group.items;
+}
+
+function customEquityControlsMarkup() {
+  return `
+    <div class="custom-equity-controls">
+      <button id="add-custom-equity" class="secondary-button" type="button">+ 添加自定义股票</button>
+    </div>
+  `;
+}
+
+function addCustomEquity() {
+  const id = `custom_equity_${Date.now()}`;
+  providerState.customItems.push({
+    id,
+    label: "自定义股票",
+    column: id.toUpperCase(),
+    artifact: "global_prices.csv",
+    sources: ["yahoo", "openbb"],
+    source_field: "custom_equity_source",
+    quote_unit: "USD",
+    symbol: "",
+    is_custom: true,
+    supports_openbb: true,
+  });
+  providerState.sourceSelections[id] = "yahoo";
+  renderProvidersTree();
+}
+
+function bindCustomItemControls(item) {
+  if (!item.is_custom) return;
+  const removeButton = document.getElementById(`remove-${item.id}`);
+  if (removeButton) {
+    removeButton.addEventListener("click", () => {
+      providerState.customItems = providerState.customItems.filter((entry) => entry.id !== item.id);
+      delete providerState.sourceSelections[item.id];
+      renderProvidersTree();
+    });
+  }
+}
+
+function collectCustomEquities() {
+  return providerState.customItems
+    .map((item) => ({
+      id: item.id,
+      label: document.getElementById(`custom-label-${item.id}`)?.value?.trim() || item.label,
+      symbol: document.getElementById(`custom-symbol-${item.id}`)?.value?.trim() || item.symbol,
+      source: providerState.sourceSelections[item.id] || "yahoo",
+    }))
+    .filter((item) => item.symbol);
+}
+
+function sourceOptionLabel(source) {
+  return source === "openbb" ? "openbb · OpenBB" : source;
+}
+
+async function openFolder(target) {
+  const runId = currentRunId();
+  if (!runId) {
+    setProvidersStatus("请先创建一个实验 run。");
     return;
   }
-  container.innerHTML = entries
-    .map(([name, rows]) => {
-      const columns = rows.length ? Object.keys(rows[0]) : [];
-      return `
-        <div class="preview-card">
-          <strong>${name}</strong>
-          <table>
-            <thead><tr>${columns.map((column) => `<th>${column}</th>`).join("")}</tr></thead>
-            <tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${formatValue(row[column])}</td>`).join("")}</tr>`).join("")}</tbody>
-          </table>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function formatValue(value) {
-  if (value == null) return "";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  try {
+    const result = await api.openFolder(runId, target);
+    setProvidersStatus(`已打开: ${result.path}`);
+  } catch (error) {
+    setProvidersStatus(`打开失败: ${error.message}`);
+  }
 }
 
 async function handle(res) {

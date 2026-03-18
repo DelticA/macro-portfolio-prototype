@@ -3,7 +3,7 @@
 Rule-based, macro regime-aware portfolio construction prototype for a mixed US/China asset universe.
 
 Core modules:
-- `MacroDataset`: aligns macro releases, engineers monthly features, and converts local asset returns into a USD research view.
+- `MacroDataset`: aligns macro releases, engineers monthly features, and converts China assets from raw CNY pricing into a USD research view.
 - `RegionalRegimeModel`: estimates US and China growth/inflation scores and regional regimes.
 - `PortfolioRegimeAggregator`: maps regional signals into a portfolio-level regime.
 - `PortfolioPolicy`: applies regime-specific bounds and solves either a CVaR-style or risk-parity allocation.
@@ -25,6 +25,7 @@ Main ideas:
 - each stage writes artifacts under its own folder
 - the backend exposes separate endpoints for `providers`, `data`, `regime`, `policy`, and `backtest`
 - regime and policy models now have pluggable adapters, so clustering and ML models can be added without rewriting the UI
+- `runs/` is git-ignored, so local experiment data and logs stay out of GitHub
 
 Start the local lab API:
 

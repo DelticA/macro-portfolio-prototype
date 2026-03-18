@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macro Portfolio Lab 2.0</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260318b" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260318f" />
   </head>
   <body>
     <main class="shell">
@@ -45,16 +45,6 @@
               <label>FRED API KEY
                 <input id="fred-api-key" placeholder="若环境中已有则自动填写" />
               </label>
-              <div class="hint-box">
-                <strong>API 自动填写</strong>
-                <div>如果环境变量或 `.env.secrets` 中已存在 `FRED_API_KEY`，页面会自动填入。</div>
-              </div>
-            </div>
-
-            <div class="form-grid compact-grid">
-              <label>沪深300 ETF 代码<input id="csi300-code" value="510300.SH" /></label>
-              <label>科创50 ETF 代码<input id="star50-code" value="588000.SH" /></label>
-              <label>中国国债 ETF 代码<input id="cgb-code" value="511010.SH" /></label>
             </div>
 
             <div id="providers-tree" class="accordion-stack">
@@ -70,9 +60,17 @@
               </div>
             </div>
             <div id="providers-status" class="status-line"></div>
-            <div id="providers-results" class="group-results"></div>
+            <div class="folder-actions">
+              <select id="providers-copy-source"></select>
+              <button id="load-providers-from-run" class="secondary-button">从已有实验载入已拉取数据</button>
+              <button id="open-run-folder" class="secondary-button">在本地打开 Run 文件夹</button>
+              <button id="open-providers-folder" class="secondary-button">在本地打开 Providers 文件夹</button>
+            </div>
             <pre id="providers-log" class="stage-log"></pre>
-            <div id="providers-preview" class="stage-preview"></div>
+            <div class="hint-box">
+              <strong>说明</strong>
+              <div>数据预览表已从前端移除，避免右侧面板过宽。需要看原始文件时，直接点击上面的“在本地打开”。</div>
+            </div>
           </article>
         </div>
       </section>
@@ -82,6 +80,6 @@
       <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
       <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
     </main>
-    <script src="/static/app.js?v=20260318b" type="module"></script>
+    <script src="/static/app.js?v=20260318f" type="module"></script>
   </body>
 </html>

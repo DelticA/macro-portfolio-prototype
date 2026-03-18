@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -63,9 +64,31 @@ def get_run(run_id: str):
         raise HTTPException(status_code=404, detail="Run not found") from exc
 
 
+@app.post("/api/runs/{run_id}/open")
+def open_run_folder(run_id: str, target: str = "run"):
+    run_dir = run_store.run_dir(run_id)
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    targets = {
+        "run": run_dir,
+        "providers": run_dir / "providers",
+    }
+    path = targets.get(target)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Target folder not found")
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["open", str(path)], check=True)
+    return {"ok": True, "path": str(path)}
+
+
 @app.post("/api/runs/{run_id}/providers", response_model=StageResponse)
 def run_providers(run_id: str, request: ProvidersRequest):
     return _stage_response(run_id, "providers", lambda: pipeline.run_providers(run_id, request))
+
+
+@app.post("/api/runs/{run_id}/providers/load", response_model=StageResponse)
+def load_providers(run_id: str, source_run_id: str):
+    return _stage_response(run_id, "providers", lambda: pipeline.load_providers_from_run(run_id, source_run_id))
 
 
 @app.post("/api/runs/{run_id}/data", response_model=StageResponse)

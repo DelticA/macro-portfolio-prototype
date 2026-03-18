@@ -157,6 +157,9 @@ class OpenBBClient:
         except ImportError as exc:
             raise ImportError("OpenBB is not installed. Install it with `pip install openbb` if you want this adapter.") from exc
         self.obb = obb
+        fred_api_key = _resolve_secret("FRED_API_KEY")
+        if fred_api_key and getattr(self.obb.user.credentials, "fred_api_key", None) != fred_api_key:
+            self.obb.user.credentials.fred_api_key = fred_api_key
 
     def fetch_fred_series(
         self,
@@ -166,14 +169,19 @@ class OpenBBClient:
     ) -> pd.DataFrame:
         frames = {}
         for alias, symbol in series_map.items():
-            df = self.obb.economy.fred_series(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                provider="fred",
-            ).to_df()
-            value_column = "value" if "value" in df.columns else df.columns[-1]
-            frames[alias] = df.set_index("date")[value_column].rename(alias)
+            try:
+                df = self.obb.economy.fred_series(
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    provider="fred",
+                ).to_df()
+                df = _openbb_with_date_index(df)
+                value_column = "value" if "value" in df.columns else df.columns[-1]
+                frames[alias] = df[value_column].rename(alias)
+            except Exception:
+                fallback = FredClient().fetch_series({alias: symbol}, start_date=start_date, end_date=end_date)
+                frames[alias] = fallback[alias]
         return pd.DataFrame(frames).sort_index()
 
     def fetch_price_history(
@@ -192,8 +200,9 @@ class OpenBBClient:
         }[asset_class]
         for alias, symbol in symbol_map.items():
             df = command(symbol=symbol, start_date=start_date, end_date=end_date, provider="yfinance").to_df()
+            df = _openbb_with_date_index(df)
             close_column = "adj_close" if "adj_close" in df.columns else "close"
-            frames[alias] = df.set_index("date")[close_column].rename(alias)
+            frames[alias] = df[close_column].rename(alias)
         return pd.DataFrame(frames).sort_index()
 
 
@@ -271,18 +280,23 @@ class AkshareClient:
         ).sort_index().loc[pd.Timestamp(start_date) : pd.Timestamp(end_date)]
 
     def fetch_cn_macro(self, aliases: list[str] | None = None) -> pd.DataFrame:
+        builders = {
+            "pmi": lambda: _akshare_macro_series(self.ak.macro_china_pmi_yearly(), "pmi"),
+            "cpi": lambda: _akshare_macro_series(self.ak.macro_china_cpi_yearly(), "cpi"),
+            "ppi": lambda: _akshare_macro_series(self.ak.macro_china_ppi_yearly(), "ppi"),
+            "m2": lambda: _akshare_macro_series(self.ak.macro_china_m2_yearly(), "m2"),
+            "industrial": lambda: _akshare_macro_series(self.ak.macro_china_industrial_production_yoy(), "industrial"),
+            "gdp": lambda: _akshare_macro_series(self.ak.macro_china_gdp_yearly(), "gdp"),
+            "non_man_pmi": lambda: _akshare_macro_series(self.ak.macro_china_non_man_pmi(), "non_man_pmi"),
+            "exports_yoy": lambda: _akshare_macro_series(self.ak.macro_china_exports_yoy(), "exports_yoy"),
+            "imports_yoy": lambda: _akshare_macro_series(self.ak.macro_china_imports_yoy(), "imports_yoy"),
+            "trade_balance": lambda: _akshare_macro_series(self.ak.macro_china_trade_balance(), "trade_balance"),
+            "retail_sales": lambda: _akshare_month_field_series(self.ak.macro_china_consumer_goods_retail(), "月份", "同比增长", "retail_sales"),
+            "new_credit": lambda: _akshare_month_field_series(self.ak.macro_china_new_financial_credit(), "月份", "当月", "new_credit"),
+        }
+        selected_aliases = aliases or list(builders.keys())
         with _disabled_proxy_env():
-            series_map = {
-                "pmi": self.ak.macro_china_pmi_yearly(),
-                "cpi": self.ak.macro_china_cpi_yearly(),
-                "ppi": self.ak.macro_china_ppi_yearly(),
-                "m2": self.ak.macro_china_m2_yearly(),
-                "industrial": self.ak.macro_china_industrial_production_yoy(),
-                "gdp": self.ak.macro_china_gdp_yearly(),
-            }
-        if aliases:
-            series_map = {alias: frame for alias, frame in series_map.items() if alias in aliases}
-        frames = [_akshare_macro_series(frame, alias) for alias, frame in series_map.items()]
+            frames = [builders[alias]() for alias in selected_aliases if alias in builders]
         return pd.concat(frames, axis=1).sort_index()
 
 @dataclass
@@ -466,3 +480,25 @@ def _akshare_macro_series(frame: pd.DataFrame, name: str) -> pd.Series:
     formatted["今值"] = pd.to_numeric(formatted["今值"], errors="coerce")
     series = formatted.dropna(subset=["日期"]).drop_duplicates(subset=["日期"], keep="last").set_index("日期")["今值"]
     return series.rename(name)
+
+
+def _akshare_month_field_series(frame: pd.DataFrame, date_col: str, value_col: str, name: str) -> pd.Series:
+    formatted = frame[[date_col, value_col]].copy()
+    formatted[date_col] = formatted[date_col].astype(str).str.replace("月份", "", regex=False).str.replace("年", "-", regex=False)
+    formatted[date_col] = pd.to_datetime(formatted[date_col], errors="coerce").dt.to_period("M").dt.to_timestamp("M")
+    formatted[value_col] = pd.to_numeric(formatted[value_col], errors="coerce")
+    series = formatted.dropna(subset=[date_col]).drop_duplicates(subset=[date_col], keep="last").set_index(date_col)[value_col]
+    return series.rename(name)
+
+
+def _openbb_with_date_index(frame: pd.DataFrame) -> pd.DataFrame:
+    formatted = frame.copy()
+    if "date" in formatted.columns:
+        formatted["date"] = pd.to_datetime(formatted["date"])
+        return formatted.set_index("date").sort_index()
+    try:
+        formatted.index = pd.to_datetime(formatted.index)
+    except (ValueError, TypeError):
+        pass
+    formatted.index.name = formatted.index.name or "date"
+    return formatted.sort_index()

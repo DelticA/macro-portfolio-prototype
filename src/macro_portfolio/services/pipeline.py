@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import shutil
+from datetime import datetime
 
 import pandas as pd
 
@@ -34,7 +36,8 @@ class PipelineService:
     def run_providers(self, run_id: str, request: ProvidersRequest) -> dict:
         stage = "providers"
         self.run_store.mark_stage(run_id, stage, "running")
-        selected_items = request.selected_items or list(PROVIDER_ITEMS.keys())
+        item_definitions = _provider_items_map(request)
+        selected_items = request.selected_items or list(item_definitions.keys())
         self.run_store.log(run_id, stage, f"Fetching data for {request.start_date} -> {request.end_date} | items={','.join(selected_items)}")
 
         try:
@@ -43,17 +46,17 @@ class PipelineService:
             items_dir.mkdir(parents=True, exist_ok=True)
 
             for item_id in selected_items:
-                item_frame = self._fetch_provider_item(item_id, request)
+                item_frame = self._fetch_provider_item(item_id, request, item_definitions)
                 write_frame(item_frame, items_dir / f"{item_id}.csv")
                 self.run_store.log(run_id, stage, f"Fetched {item_id}")
 
-            us_macro, cn_macro, global_prices, cn_assets = self._assemble_provider_artifacts(items_dir)
+            us_macro, cn_macro, global_prices, cn_assets = self._assemble_provider_artifacts(items_dir, item_definitions)
             write_frame(us_macro, stage_dir / "us_macro.csv")
             write_frame(cn_macro, stage_dir / "cn_macro.csv")
             write_frame(global_prices, stage_dir / "global_prices.csv")
             write_frame(cn_assets, stage_dir / "cn_assets.csv")
 
-            catalog = self._provider_catalog(items_dir, request)
+            catalog = self._provider_catalog(items_dir, request, item_definitions)
             write_json(catalog, stage_dir / "catalog.json")
             self.run_store.log(run_id, stage, "Provider stage finished successfully")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": catalog})
@@ -103,6 +106,33 @@ class PipelineService:
             self.run_store.log(run_id, stage, f"Data stage produced {len(features)} feature rows")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
             return summary
+        except Exception as exc:
+            return self._fail_stage(run_id, stage, exc)
+
+    def load_providers_from_run(self, run_id: str, source_run_id: str) -> dict:
+        stage = "providers"
+        self._require_stage_success(source_run_id, stage)
+        self.run_store.mark_stage(run_id, stage, "running")
+        self.run_store.log(run_id, stage, f"Loading providers artifacts from existing run {source_run_id}")
+        try:
+            source_dir = self.run_store.stage_dir(source_run_id, stage)
+            target_dir = self.run_store.stage_dir(run_id, stage)
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(source_dir, target_dir, copy_function=shutil.copy2)
+
+            source_log = self.run_store.run_dir(source_run_id) / "logs" / f"{stage}.log"
+            target_log = self.run_store.run_dir(run_id) / "logs" / f"{stage}.log"
+            target_log.parent.mkdir(parents=True, exist_ok=True)
+            if source_log.exists():
+                shutil.copy2(source_log, target_log)
+                self.run_store.log(run_id, stage, f"Reused providers log from {source_run_id}")
+
+            catalog = read_json(target_dir / "catalog.json")
+            catalog["loaded_from_run"] = source_run_id
+            write_json(catalog, target_dir / "catalog.json")
+            self.run_store.mark_stage(run_id, stage, "success", {"summary": catalog})
+            return catalog
         except Exception as exc:
             return self._fail_stage(run_id, stage, exc)
 
@@ -267,10 +297,10 @@ class PipelineService:
         self.run_store.mark_stage(run_id, stage, "failed", {"summary": {"error": message}})
         raise exc
 
-    def _fetch_provider_item(self, item_id: str, request: ProvidersRequest) -> pd.DataFrame:
-        if item_id not in PROVIDER_ITEMS:
+    def _fetch_provider_item(self, item_id: str, request: ProvidersRequest, item_definitions: dict[str, dict]) -> pd.DataFrame:
+        if item_id not in item_definitions:
             raise ValueError(f"Unknown provider item: {item_id}")
-        item = PROVIDER_ITEMS[item_id]
+        item = item_definitions[item_id]
         source = getattr(request, item["source_field"], item["sources"][0])
         kind = item["kind"]
         if kind == "us_macro":
@@ -279,8 +309,13 @@ class PipelineService:
             return self._fetch_cn_macro_item(item["alias"])
         if kind == "us_asset":
             return self._fetch_us_asset_item(item["column"], source, request)
+        if kind == "hk_asset":
+            symbol = getattr(request, item["code_field"], item["symbol"]) if item.get("code_field") else item["symbol"]
+            return self._fetch_generic_equity_item(item["column"], symbol, source, request)
         if kind == "cn_asset":
             return self._fetch_cn_asset_item(item["column"], request)
+        if kind == "custom_equity":
+            return self._fetch_generic_equity_item(item["column"], item["symbol"], source, request)
         if kind == "crypto":
             return self._fetch_crypto_item(source, request)
         if kind == "fx":
@@ -323,6 +358,14 @@ class PipelineService:
         )
         return frame[[column]]
 
+    def _fetch_generic_equity_item(self, column: str, symbol: str, source: str, request: ProvidersRequest) -> pd.DataFrame:
+        if source == "openbb":
+            return OpenBBClient().fetch_price_history({column: symbol}, start_date=request.start_date, end_date=request.end_date, asset_class="equity")
+        try:
+            return YahooFinanceClient().fetch_close_prices({column: symbol}, start_date=request.start_date, end_date=request.end_date, interval="1d")
+        except Exception:
+            return OpenBBClient().fetch_price_history({column: symbol}, start_date=request.start_date, end_date=request.end_date, asset_class="equity")
+
     def _fetch_crypto_item(self, source: str, request: ProvidersRequest) -> pd.DataFrame:
         if source == "openbb":
             return OpenBBClient().fetch_price_history({"BTC": "BTC-USD"}, start_date=request.start_date, end_date=request.end_date, asset_class="crypto").resample("ME").last()
@@ -339,12 +382,12 @@ class PipelineService:
             return frame
         return FredClient(api_key=request.fred_api_key or None).fetch_series(DEFAULT_FRED_FX_SERIES, start_date=request.start_date, end_date=request.end_date).resample("ME").last()
 
-    def _assemble_provider_artifacts(self, items_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def _assemble_provider_artifacts(self, items_dir: Path, item_definitions: dict[str, dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         us_macro_parts = []
         cn_macro_parts = []
         global_price_parts = []
         cn_asset_parts = []
-        for item_id, item in PROVIDER_ITEMS.items():
+        for item_id, item in item_definitions.items():
             path = items_dir / f"{item_id}.csv"
             if not path.exists():
                 continue
@@ -353,7 +396,7 @@ class PipelineService:
                 us_macro_parts.append(frame)
             elif item["kind"] == "cn_macro":
                 cn_macro_parts.append(frame)
-            elif item["kind"] in {"us_asset", "crypto", "fx"}:
+            elif item["kind"] in {"us_asset", "hk_asset", "custom_equity", "crypto", "fx"}:
                 global_price_parts.append(frame)
             elif item["kind"] == "cn_asset":
                 cn_asset_parts.append(frame)
@@ -364,8 +407,8 @@ class PipelineService:
             pd.concat(cn_asset_parts, axis=1).sort_index() if cn_asset_parts else pd.DataFrame(),
         )
 
-    def _provider_catalog(self, items_dir: Path, request: ProvidersRequest) -> dict:
-        return {"categories": [_provider_group_payload(group, items_dir, request) for group in PROVIDER_GROUPS]}
+    def _provider_catalog(self, items_dir: Path, request: ProvidersRequest, item_definitions: dict[str, dict]) -> dict:
+        return {"categories": [_provider_group_payload(group, items_dir, request, item_definitions) for group in _provider_groups(request)]}
 
 
 class _BacktestPolicyAdapter:
@@ -387,7 +430,15 @@ def _frame_summary(name: str, frame: pd.DataFrame) -> dict:
     }
 
 
-def _provider_item_summary(label: str, source: str, frame: pd.DataFrame, artifact: str, column_name: str) -> dict:
+def _provider_item_summary(
+    label: str,
+    source: str,
+    frame: pd.DataFrame,
+    artifact: str,
+    column_name: str,
+    *,
+    status: str | None = None,
+) -> dict:
     has_rows = not frame.empty
     non_null_count = int(frame.notna().sum().sum()) if has_rows else 0
     return {
@@ -395,11 +446,12 @@ def _provider_item_summary(label: str, source: str, frame: pd.DataFrame, artifac
         "source": source,
         "artifact": artifact,
         "column": column_name,
-        "status": "success" if has_rows and non_null_count > 0 else "failed",
+        "status": status or ("success" if has_rows and non_null_count > 0 else "failed"),
         "rows": int(len(frame)),
         "non_null": non_null_count,
         "start": str(frame.index.min()) if has_rows else None,
         "end": str(frame.index.max()) if has_rows else None,
+        "frequency": _infer_frequency_label(frame),
     }
 
 
@@ -418,44 +470,60 @@ def _json_safe(value):
 
 
 PROVIDER_ITEMS = {
-    "tlt": {"label": "美国国债 ETF (TLT)", "group": "债券", "category": "资产数据", "artifact": "global_prices.csv", "column": "TLT", "kind": "us_asset", "source_field": "us_bond_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "cgb": {"label": "中国国债 ETF", "group": "债券", "category": "资产数据", "artifact": "cn_assets.csv", "column": "CGB", "kind": "cn_asset", "source_field": "cn_bond_source", "sources": ["akshare"]},
-    "spy": {"label": "标普500 ETF (SPY)", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "SPY", "kind": "us_asset", "source_field": "us_equity_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "qqq": {"label": "纳斯达克100 ETF (QQQ)", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "QQQ", "kind": "us_asset", "source_field": "us_equity_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "csi300": {"label": "沪深300 ETF", "group": "股票", "category": "资产数据", "artifact": "cn_assets.csv", "column": "CSI300", "kind": "cn_asset", "source_field": "cn_equity_source", "sources": ["akshare"]},
-    "star50": {"label": "科创50 ETF", "group": "股票", "category": "资产数据", "artifact": "cn_assets.csv", "column": "STAR50", "kind": "cn_asset", "source_field": "cn_equity_source", "sources": ["akshare"]},
-    "gld": {"label": "黄金 ETF (GLD)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "GLD", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "slv": {"label": "白银 ETF (SLV)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "SLV", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "dbc": {"label": "商品 ETF (DBC)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "DBC", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "uso": {"label": "原油 ETF (USO)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "USO", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"]},
-    "btc": {"label": "比特币", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "BTC", "kind": "crypto", "source_field": "crypto_source", "sources": ["binance", "yahoo", "openbb"]},
-    "us_ip": {"label": "工业生产", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "ip", "kind": "us_macro", "alias": "ip", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_payroll": {"label": "非农就业", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "payroll", "kind": "us_macro", "alias": "payroll", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_unemployment": {"label": "失业率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "unemployment", "kind": "us_macro", "alias": "unemployment", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_cpi": {"label": "CPI", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "cpi", "kind": "us_macro", "alias": "cpi", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_core_cpi": {"label": "核心 CPI", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "core_cpi", "kind": "us_macro", "alias": "core_cpi", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_m2": {"label": "M2", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "m2", "kind": "us_macro", "alias": "m2", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_fed_funds": {"label": "联邦基金利率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "fed_funds", "kind": "us_macro", "alias": "fed_funds", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_yield_10y": {"label": "10Y 国债收益率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "yield_10y", "kind": "us_macro", "alias": "yield_10y", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_yield_2y": {"label": "2Y 国债收益率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "yield_2y", "kind": "us_macro", "alias": "yield_2y", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_term_spread": {"label": "期限利差", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "term_spread", "kind": "us_macro", "alias": "term_spread", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "us_breakeven_5y": {"label": "5Y Breakeven", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "breakeven_5y", "kind": "us_macro", "alias": "breakeven_5y", "source_field": "us_macro_source", "sources": ["fred", "openbb"]},
-    "cn_pmi": {"label": "PMI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "pmi", "kind": "cn_macro", "alias": "pmi", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "cn_cpi": {"label": "CPI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "cpi", "kind": "cn_macro", "alias": "cpi", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "cn_ppi": {"label": "PPI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "ppi", "kind": "cn_macro", "alias": "ppi", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "cn_m2": {"label": "M2", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "m2", "kind": "cn_macro", "alias": "m2", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "cn_industrial": {"label": "工业增加值", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "industrial", "kind": "cn_macro", "alias": "industrial", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "cn_gdp": {"label": "GDP", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "gdp", "kind": "cn_macro", "alias": "gdp", "source_field": "cn_macro_source", "sources": ["akshare"]},
-    "usdcny": {"label": "美元兑人民币", "group": "美国", "category": "宏观经济数据", "artifact": "global_prices.csv", "column": "USDCNY", "kind": "fx", "source_field": "fx_source", "sources": ["fred", "yahoo", "openbb"]},
+    "tlt": {"label": "美国国债 ETF (TLT)", "group": "债券", "category": "资产数据", "artifact": "global_prices.csv", "column": "TLT", "kind": "us_asset", "source_field": "us_bond_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价；进入 data 阶段后直接作为美元资产处理。"},
+    "cgb": {"label": "中国国债 ETF", "group": "债券", "category": "资产数据", "artifact": "cn_assets.csv", "column": "CGB", "kind": "cn_asset", "source_field": "cn_bond_source", "sources": ["akshare"], "quote_unit": "CNY", "research_note": "原始数据为人民币计价；进入 data 阶段后按 USD 研究口径换算收益。", "code_field": "cgb_code", "code_label": "中债 ETF 代码"},
+    "spy": {"label": "标普500 ETF (SPY)", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "SPY", "kind": "us_asset", "source_field": "us_equity_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "qqq": {"label": "纳斯达克100 ETF (QQQ)", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "QQQ", "kind": "us_asset", "source_field": "us_equity_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "csi300": {"label": "沪深300 ETF", "group": "股票", "category": "资产数据", "artifact": "cn_assets.csv", "column": "CSI300", "kind": "cn_asset", "source_field": "cn_equity_source", "sources": ["akshare"], "quote_unit": "CNY", "research_note": "原始数据为人民币计价；进入 data 阶段后按 USD 研究口径换算收益。", "code_field": "csi300_code", "code_label": "沪深300 ETF 代码"},
+    "star50": {"label": "科创50 ETF", "group": "股票", "category": "资产数据", "artifact": "cn_assets.csv", "column": "STAR50", "kind": "cn_asset", "source_field": "cn_equity_source", "sources": ["akshare"], "quote_unit": "CNY", "research_note": "原始数据为人民币计价；进入 data 阶段后按 USD 研究口径换算收益。", "code_field": "star50_code", "code_label": "科创50 ETF 代码"},
+    "hsi_hk": {"label": "恒生指数 ETF", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "HSI_HK", "symbol": "2800.HK", "kind": "hk_asset", "source_field": "hk_equity_source", "sources": ["yahoo", "openbb"], "quote_unit": "HKD", "research_note": "原始数据为港币计价。", "code_field": "hsi_code", "code_label": "恒生 ETF 代码"},
+    "hstech_hk": {"label": "恒生科技 ETF", "group": "股票", "category": "资产数据", "artifact": "global_prices.csv", "column": "HSTECH_HK", "symbol": "3033.HK", "kind": "hk_asset", "source_field": "hk_equity_source", "sources": ["yahoo", "openbb"], "quote_unit": "HKD", "research_note": "原始数据为港币计价。", "code_field": "hstech_code", "code_label": "恒生科技 ETF 代码"},
+    "gld": {"label": "黄金 ETF (GLD)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "GLD", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "slv": {"label": "白银 ETF (SLV)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "SLV", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "dbc": {"label": "商品 ETF (DBC)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "DBC", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "uso": {"label": "原油 ETF (USO)", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "USO", "kind": "us_asset", "source_field": "other_assets_source", "sources": ["stooq", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据为美元计价。"},
+    "btc": {"label": "比特币", "group": "其他资产", "category": "资产数据", "artifact": "global_prices.csv", "column": "BTC", "kind": "crypto", "source_field": "crypto_source", "sources": ["binance", "yahoo", "openbb"], "quote_unit": "USD", "research_note": "原始数据统一按美元口径拉取。"},
+    "us_ip": {"label": "工业生产", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "ip", "kind": "us_macro", "alias": "ip", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_payroll": {"label": "非农就业", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "payroll", "kind": "us_macro", "alias": "payroll", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_unemployment": {"label": "失业率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "unemployment", "kind": "us_macro", "alias": "unemployment", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_cpi": {"label": "CPI", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "cpi", "kind": "us_macro", "alias": "cpi", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_core_cpi": {"label": "核心 CPI", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "core_cpi", "kind": "us_macro", "alias": "core_cpi", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_m2": {"label": "M2", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "m2", "kind": "us_macro", "alias": "m2", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_fed_funds": {"label": "联邦基金利率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "fed_funds", "kind": "us_macro", "alias": "fed_funds", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_yield_10y": {"label": "10Y 国债收益率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "yield_10y", "kind": "us_macro", "alias": "yield_10y", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_yield_2y": {"label": "2Y 国债收益率", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "yield_2y", "kind": "us_macro", "alias": "yield_2y", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_term_spread": {"label": "期限利差", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "term_spread", "kind": "us_macro", "alias": "term_spread", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "us_breakeven_5y": {"label": "5Y Breakeven", "group": "美国", "category": "宏观经济数据", "artifact": "us_macro.csv", "column": "breakeven_5y", "kind": "us_macro", "alias": "breakeven_5y", "source_field": "us_macro_source", "sources": ["fred", "openbb"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_pmi": {"label": "PMI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "pmi", "kind": "cn_macro", "alias": "pmi", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_cpi": {"label": "CPI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "cpi", "kind": "cn_macro", "alias": "cpi", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_ppi": {"label": "PPI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "ppi", "kind": "cn_macro", "alias": "ppi", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_m2": {"label": "M2", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "m2", "kind": "cn_macro", "alias": "m2", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_industrial": {"label": "工业增加值", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "industrial", "kind": "cn_macro", "alias": "industrial", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_gdp": {"label": "GDP", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "gdp", "kind": "cn_macro", "alias": "gdp", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "宏观原始口径保留，不做货币换算。"},
+    "cn_non_man_pmi": {"label": "非制造业 PMI", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "non_man_pmi", "kind": "cn_macro", "alias": "non_man_pmi", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "服务和建筑景气补充。"},
+    "cn_exports_yoy": {"label": "出口同比", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "exports_yoy", "kind": "cn_macro", "alias": "exports_yoy", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "外需与制造业景气补充。"},
+    "cn_imports_yoy": {"label": "进口同比", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "imports_yoy", "kind": "cn_macro", "alias": "imports_yoy", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "内需与补库周期补充。"},
+    "cn_retail_sales": {"label": "社零同比", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "retail_sales", "kind": "cn_macro", "alias": "retail_sales", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "居民消费补充。"},
+    "cn_new_credit": {"label": "新增人民币贷款", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "new_credit", "kind": "cn_macro", "alias": "new_credit", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "信用脉冲补充。"},
+    "cn_trade_balance": {"label": "贸易差额", "group": "中国", "category": "宏观经济数据", "artifact": "cn_macro.csv", "column": "trade_balance", "kind": "cn_macro", "alias": "trade_balance", "source_field": "cn_macro_source", "sources": ["akshare"], "quote_unit": "-", "research_note": "外贸总量补充。"},
+    "usdcny": {"label": "美元兑人民币", "group": "美国", "category": "宏观经济数据", "artifact": "global_prices.csv", "column": "USDCNY", "kind": "fx", "source_field": "fx_source", "sources": ["fred", "yahoo", "openbb"], "quote_unit": "-", "research_note": "该序列只用于人民币资产换算到 USD 研究口径。"},
 }
 
 PROVIDER_GROUPS = [
     {"category": "资产数据", "group": "债券", "items": ["tlt", "cgb"]},
-    {"category": "资产数据", "group": "股票", "items": ["spy", "qqq", "csi300", "star50"]},
+    {"category": "资产数据", "group": "股票", "items": ["spy", "qqq", "csi300", "star50", "hsi_hk", "hstech_hk"]},
     {"category": "资产数据", "group": "其他资产", "items": ["gld", "slv", "dbc", "uso", "btc"]},
     {"category": "宏观经济数据", "group": "美国", "items": ["us_ip", "us_payroll", "us_unemployment", "us_cpi", "us_core_cpi", "us_m2", "us_fed_funds", "us_yield_10y", "us_yield_2y", "us_term_spread", "us_breakeven_5y", "usdcny"]},
-    {"category": "宏观经济数据", "group": "中国", "items": ["cn_pmi", "cn_cpi", "cn_ppi", "cn_m2", "cn_industrial", "cn_gdp"]},
+    {"category": "宏观经济数据", "group": "中国", "items": ["cn_pmi", "cn_non_man_pmi", "cn_cpi", "cn_ppi", "cn_m2", "cn_industrial", "cn_gdp", "cn_exports_yoy", "cn_imports_yoy", "cn_retail_sales", "cn_new_credit", "cn_trade_balance"]},
 ]
+
+DEFAULT_PROVIDER_CODE_VALUES = {
+    "csi300_code": "510300.SH",
+    "star50_code": "588000.SH",
+    "cgb_code": "511010.SH",
+    "hsi_code": "2800.HK",
+    "hstech_code": "3033.HK",
+}
 
 PIPELINE_SERVICE_METADATA = {
     "provider_tree": [
@@ -472,6 +540,12 @@ PIPELINE_SERVICE_METADATA = {
                             "sources": PROVIDER_ITEMS[item_id]["sources"],
                             "source_field": PROVIDER_ITEMS[item_id]["source_field"],
                             "artifact": PROVIDER_ITEMS[item_id]["artifact"],
+                            "quote_unit": PROVIDER_ITEMS[item_id].get("quote_unit"),
+                            "research_note": PROVIDER_ITEMS[item_id].get("research_note"),
+                            "code_field": PROVIDER_ITEMS[item_id].get("code_field"),
+                            "code_label": PROVIDER_ITEMS[item_id].get("code_label"),
+                            "code_value": DEFAULT_PROVIDER_CODE_VALUES.get(PROVIDER_ITEMS[item_id].get("code_field")),
+                            "supports_openbb": "openbb" in PROVIDER_ITEMS[item_id]["sources"],
                         }
                         for item_id in group["items"]
                     ],
@@ -485,21 +559,118 @@ PIPELINE_SERVICE_METADATA = {
 }
 
 
-def _provider_group_payload(group: dict, items_dir: Path, request: ProvidersRequest) -> dict:
+def _provider_groups(request: ProvidersRequest) -> list[dict]:
+    groups = [dict(group) for group in PROVIDER_GROUPS]
+    custom_ids = [item["id"] for item in _custom_provider_items(request).values()]
+    if custom_ids:
+        for group in groups:
+            if group["category"] == "资产数据" and group["group"] == "股票":
+                group["items"] = [*group["items"], *custom_ids]
+                break
+    return groups
+
+
+def _provider_items_map(request: ProvidersRequest) -> dict[str, dict]:
+    return {**PROVIDER_ITEMS, **_custom_provider_items(request)}
+
+
+def _custom_provider_items(request: ProvidersRequest) -> dict[str, dict]:
+    items: dict[str, dict] = {}
+    for raw in request.custom_equities:
+        symbol = str(raw.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        item_id = str(raw.get("id", "")).strip() or f"custom_{_safe_custom_id(symbol)}"
+        label = str(raw.get("label", "")).strip() or symbol
+        source = str(raw.get("source", "yahoo")).strip() or "yahoo"
+        items[item_id] = {
+            "id": item_id,
+            "label": label,
+            "group": "股票",
+            "category": "资产数据",
+            "artifact": "global_prices.csv",
+            "column": item_id.upper(),
+            "symbol": symbol,
+            "kind": "custom_equity",
+            "source_field": "custom_equity_source",
+            "sources": [source] if source == "openbb" else ["yahoo", "openbb"],
+            "quote_unit": _infer_quote_unit(symbol),
+            "research_note": "按当前 run 自定义添加。",
+            "code_field": None,
+            "code_label": None,
+            "is_custom": True,
+        }
+    return items
+
+
+def _provider_group_payload(group: dict, items_dir: Path, request: ProvidersRequest, item_definitions: dict[str, dict]) -> dict:
     return {
         "category": group["category"],
         "group": group["group"],
-        "items": [_provider_item_payload(item_id, items_dir, request) for item_id in group["items"]],
+        "items": [_provider_item_payload(item_id, items_dir, request, item_definitions) for item_id in group["items"]],
     }
 
 
-def _provider_item_payload(item_id: str, items_dir: Path, request: ProvidersRequest) -> dict:
-    item = PROVIDER_ITEMS[item_id]
+def _provider_item_payload(item_id: str, items_dir: Path, request: ProvidersRequest, item_definitions: dict[str, dict]) -> dict:
+    item = item_definitions[item_id]
     path = items_dir / f"{item_id}.csv"
-    frame = read_frame(path) if path.exists() else pd.DataFrame(columns=[item["column"]])
-    source = getattr(request, item["source_field"], item["sources"][0])
-    payload = _provider_item_summary(item["label"], source, frame, item["artifact"], item["column"])
+    if path.exists():
+        frame = read_frame(path)
+        status = None
+    else:
+        frame = pd.DataFrame(columns=[item["column"]])
+        status = "not_run"
+    if item["kind"] == "custom_equity":
+        source = next((raw.get("source") for raw in request.custom_equities if raw.get("id") == item_id), item["sources"][0])
+    else:
+        source = getattr(request, item["source_field"], item["sources"][0])
+    payload = _provider_item_summary(item["label"], source, frame, item["artifact"], item["column"], status=status)
     payload["id"] = item_id
     payload["sources"] = item["sources"]
     payload["selected_source"] = source
+    payload["quote_unit"] = item.get("quote_unit")
+    payload["research_note"] = item.get("research_note")
+    payload["code_field"] = item.get("code_field")
+    payload["code_value"] = getattr(request, item["code_field"]) if item.get("code_field") else None
+    payload["code_label"] = item.get("code_label")
+    payload["symbol"] = item.get("symbol")
+    payload["is_custom"] = item.get("is_custom", False)
+    payload["supports_openbb"] = "openbb" in item["sources"]
+    payload["last_updated"] = (
+        datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+        if path.exists()
+        else None
+    )
     return payload
+
+
+def _infer_frequency_label(frame: pd.DataFrame) -> str:
+    if frame.empty or len(frame.index) < 2:
+        return "未知"
+    index = pd.Index(pd.to_datetime(frame.index)).sort_values()
+    deltas = pd.Series(index[1:] - index[:-1]).dropna()
+    if deltas.empty:
+        return "未知"
+    median_days = deltas.dt.total_seconds().median() / 86400
+    if median_days <= 2:
+        return "日频"
+    if median_days <= 10:
+        return "周频"
+    if median_days <= 35:
+        return "月频"
+    if median_days <= 100:
+        return "季频"
+    return "低频"
+
+
+def _safe_custom_id(symbol: str) -> str:
+    return "".join(char.lower() if char.isalnum() else "_" for char in symbol).strip("_")
+
+
+def _infer_quote_unit(symbol: str) -> str:
+    symbol = symbol.upper()
+    if symbol.endswith(".HK"):
+        return "HKD"
+    if symbol.endswith(".SH") or symbol.endswith(".SZ"):
+        return "CNY"
+    return "USD"

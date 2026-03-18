@@ -22,10 +22,13 @@ class ProvidersRequest(BaseModel):
     csi300_code: str = "510300.SH"
     star50_code: str = "588000.SH"
     cgb_code: str = "511010.SH"
+    hsi_code: str = "2800.HK"
+    hstech_code: str = "3033.HK"
     fred_api_key: str | None = None
     us_macro_source: Literal["fred", "openbb"] = "fred"
     us_equity_source: Literal["stooq", "yahoo", "openbb"] = "stooq"
     us_bond_source: Literal["stooq", "yahoo", "openbb"] = "stooq"
+    hk_equity_source: Literal["yahoo", "openbb"] = "yahoo"
     cn_equity_source: Literal["akshare"] = "akshare"
     cn_bond_source: Literal["akshare"] = "akshare"
     cn_macro_source: Literal["akshare"] = "akshare"
@@ -33,6 +36,7 @@ class ProvidersRequest(BaseModel):
     crypto_source: Literal["binance", "yahoo", "openbb"] = "binance"
     fx_source: Literal["fred", "yahoo", "openbb"] = "fred"
     selected_items: list[str] | None = None
+    custom_equities: list[dict[str, str]] = Field(default_factory=list)
 
 
 class DataRequest(BaseModel):
