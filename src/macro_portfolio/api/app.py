@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import math
+import pandas as pd
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..engine.run_store import RunStore
+from ..engine.artifacts import read_frame, read_json
 from ..engine.schemas import (
     BacktestRequest,
     DataRequest,
@@ -72,6 +75,7 @@ def open_run_folder(run_id: str, target: str = "run"):
     targets = {
         "run": run_dir,
         "providers": run_dir / "providers",
+        "data": run_dir / "data",
     }
     path = targets.get(target)
     if path is None:
@@ -118,6 +122,24 @@ def get_stage(run_id: str, stage: str):
     return pipeline.get_stage_payload(run_id, stage)
 
 
+@app.get("/api/runs/{run_id}/artifacts/{stage}/{name}")
+def get_artifact(run_id: str, stage: str, name: str):
+    stage_dir = run_store.stage_dir(run_id, stage)
+    csv_path = stage_dir / f"{name}.csv"
+    json_path = stage_dir / f"{name}.json"
+    if csv_path.exists():
+        frame = read_frame(csv_path)
+        preview_frame = frame.reset_index()
+        return {
+            "name": name,
+            "rows": _json_safe(preview_frame.to_dict(orient="records")),
+            "columns": list(preview_frame.columns),
+        }
+    if json_path.exists():
+        return {"name": name, "payload": read_json(json_path)}
+    raise HTTPException(status_code=404, detail="Artifact not found")
+
+
 def _stage_response(run_id: str, stage: str, action) -> StageResponse:
     try:
         summary = action()
@@ -128,3 +150,22 @@ def _stage_response(run_id: str, stage: str, action) -> StageResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return StageResponse(run_id=run_id, stage=stage, status="success", summary=summary)
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except TypeError:
+            pass
+    if value is None:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if pd.isna(value):
+        return None
+    return value

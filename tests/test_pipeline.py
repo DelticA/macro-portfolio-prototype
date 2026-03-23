@@ -130,6 +130,28 @@ def test_frequency_alignment_and_fx_conversion():
     assert np.isclose(sample["return_1m"], expected)
 
 
+def test_missing_cn_asset_history_is_not_forced_to_zero_or_fx_only():
+    index = pd.date_range("2020-01-31", periods=6, freq="ME")
+    prices = pd.DataFrame(
+        {
+            "SPY": [100, 101, 102, 103, 104, 105],
+            "STAR50": [np.nan, np.nan, np.nan, 100, 110, 121],
+        },
+        index=index,
+    )
+    assets = [
+        AssetConfig("SPY", "US", "risk_core"),
+        AssetConfig("STAR50", "CN", "satellite"),
+    ]
+    panel = MacroDataset().build_asset_panel(prices, assets, fx_returns=pd.Series(0.01, index=index))
+    star50 = panel[panel["asset"] == "STAR50"].set_index("date").sort_index()
+    assert pd.isna(star50.loc[pd.Timestamp("2020-02-29"), "local_return_1m"])
+    assert pd.isna(star50.loc[pd.Timestamp("2020-02-29"), "return_1m"])
+    assert pd.isna(star50.loc[pd.Timestamp("2020-04-30"), "local_return_1m"])
+    assert pd.isna(star50.loc[pd.Timestamp("2020-04-30"), "return_1m"])
+    assert np.isclose(star50.loc[pd.Timestamp("2020-05-31"), "local_return_1m"], 0.1)
+
+
 def test_policy_respects_constraints():
     _, _, regime_table, _, asset_returns = build_pipeline_inputs()
     policy = PortfolioPolicy(ASSETS, PolicyConfig())

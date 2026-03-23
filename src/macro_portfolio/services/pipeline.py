@@ -101,6 +101,21 @@ class PipelineService:
                 "feature_rows": int(len(features)),
                 "asset_panel_rows": int(len(asset_panel)),
                 "asset_names": list(asset_returns.columns),
+                "raw_datasets": {
+                    "us_macro": _frame_summary("us_macro", us_macro),
+                    "cn_macro": _frame_summary("cn_macro", cn_macro),
+                    "global_prices": _frame_summary("global_prices", global_prices),
+                    "cn_assets": _frame_summary("cn_assets", cn_assets),
+                },
+                "processed_datasets": {
+                    "features": _frame_summary("features", features),
+                    "asset_returns": _frame_summary("asset_returns", asset_returns),
+                    "asset_panel": _column_date_summary("asset_panel", asset_panel, "date"),
+                },
+            }
+            summary["intersections"] = {
+                "raw": _intersection_summary(summary["raw_datasets"]),
+                "processed": _intersection_summary(summary["processed_datasets"]),
             }
             write_json(summary, stage_dir / "summary.json")
             self.run_store.log(run_id, stage, f"Data stage produced {len(features)} feature rows")
@@ -427,6 +442,7 @@ def _frame_summary(name: str, frame: pd.DataFrame) -> dict:
         "start": str(frame.index.min()) if len(frame.index) else None,
         "end": str(frame.index.max()) if len(frame.index) else None,
         "missing_ratio": float(frame.isna().mean().mean()) if not frame.empty else 0.0,
+        "frequency": _infer_frequency_label(frame),
     }
 
 
@@ -661,6 +677,27 @@ def _infer_frequency_label(frame: pd.DataFrame) -> str:
     if median_days <= 100:
         return "季频"
     return "低频"
+
+
+def _column_date_summary(name: str, frame: pd.DataFrame, column: str) -> dict:
+    if frame.empty or column not in frame.columns:
+        return {"name": name, "rows": int(len(frame)), "columns": list(frame.columns), "start": None, "end": None, "missing_ratio": 0.0, "frequency": "未知"}
+    indexed = frame.copy()
+    indexed[column] = pd.to_datetime(indexed[column], errors="coerce")
+    indexed = indexed.dropna(subset=[column]).set_index(column).sort_index()
+    return _frame_summary(name, indexed)
+
+
+def _intersection_summary(datasets: dict[str, dict]) -> dict:
+    starts = [pd.Timestamp(item["start"]) for item in datasets.values() if item.get("start")]
+    ends = [pd.Timestamp(item["end"]) for item in datasets.values() if item.get("end")]
+    if not starts or not ends:
+        return {"start": None, "end": None}
+    start = max(starts)
+    end = min(ends)
+    if start > end:
+        return {"start": None, "end": None}
+    return {"start": str(start), "end": str(end)}
 
 
 def _safe_custom_id(symbol: str) -> str:

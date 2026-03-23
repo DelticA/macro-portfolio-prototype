@@ -48,21 +48,28 @@ class MacroDataset:
         monthly_prices = prices.copy().sort_index()
         monthly_prices.index = pd.to_datetime(monthly_prices.index).to_period("M").to_timestamp("M")
         monthly_prices = monthly_prices[~monthly_prices.index.duplicated(keep="last")]
-        returns = monthly_prices.pct_change().dropna(how="all")
+        returns = monthly_prices.pct_change(fill_method=None).dropna(how="all")
 
-        fx = pd.Series(0.0, index=returns.index)
+        fx = pd.Series(np.nan, index=returns.index, dtype=float)
         if fx_returns is not None:
             fx = fx_returns.copy().sort_index()
             fx.index = pd.to_datetime(fx.index).to_period("M").to_timestamp("M")
-            fx = fx.reindex(returns.index).fillna(0.0)
+            fx = fx.reindex(returns.index)
 
         panel_records: list[pd.DataFrame] = []
         config_map = {asset.asset: asset for asset in assets}
         for asset_name, series in returns.items():
             config = config_map[asset_name]
-            local_return = series.fillna(0.0)
-            fx_return = fx if config.region == "CN" and base_currency == "USD" else pd.Series(0.0, index=returns.index)
-            usd_return = (1 + local_return) * (1 + fx_return) - 1
+            local_return = series.astype(float)
+            if config.region == "CN" and base_currency == "USD":
+                fx_return = pd.Series(np.nan, index=returns.index, dtype=float)
+                usd_return = pd.Series(np.nan, index=returns.index, dtype=float)
+                valid = local_return.notna() & fx.notna()
+                fx_return.loc[valid] = fx.loc[valid]
+                usd_return.loc[valid] = (1 + local_return.loc[valid]) * (1 + fx_return.loc[valid]) - 1
+            else:
+                fx_return = pd.Series(0.0, index=returns.index, dtype=float)
+                usd_return = local_return.copy()
             panel_records.append(
                 pd.DataFrame(
                     {

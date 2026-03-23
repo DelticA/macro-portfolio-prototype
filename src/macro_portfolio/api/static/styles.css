@@ -138,6 +138,7 @@ select, input, textarea {
   gap: 12px;
 }
 .compact-grid { margin-top: 12px; }
+.section-gap { margin-top: 16px; }
 
 .form-grid label, .inline-grid label {
   display: grid;
@@ -345,6 +346,172 @@ select, input, textarea {
   margin-bottom: 16px;
 }
 
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.metric-card {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,.82);
+  border: 1px solid var(--line);
+  min-height: 108px;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.metric-value {
+  margin-top: 8px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.preview-card {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,.76);
+  border: 1px solid var(--line);
+}
+
+.range-section {
+  margin-top: 18px;
+}
+
+.spotlight-section {
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255,255,255,.78);
+  border: 1px solid var(--line);
+}
+
+.range-grid,
+.chart-control-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.range-card {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255,255,255,.82);
+  border: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+}
+
+.range-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.range-frequency {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(20, 90, 65, 0.08);
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.range-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.range-row strong {
+  color: var(--text);
+  text-align: right;
+}
+
+.intersection-card {
+  margin-bottom: 12px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(20, 90, 65, 0.14), rgba(20, 90, 65, 0.06));
+  border: 1px solid rgba(20, 90, 65, 0.14);
+}
+
+.intersection-label {
+  font-size: 12px;
+  color: var(--brand-soft);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+
+.intersection-value {
+  margin-top: 8px;
+  color: var(--brand);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.toggle-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.82);
+  border: 1px solid var(--line);
+}
+
+.toggle-pill input {
+  width: auto;
+}
+
+.toggle-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.table-wrap {
+  overflow: auto;
+}
+
+.preview-card canvas {
+  width: 100% !important;
+  min-height: 360px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+th, td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
 .group-results, .stage-preview {
   display: grid;
   gap: 14px;
@@ -403,6 +570,6 @@ pre.stage-log {
 
 @media (max-width: 760px) {
   .hero { flex-direction: column; }
-  .form-grid, .inline-grid, .catalog-item, .result-item, .provider-main { grid-template-columns: 1fr; }
+  .form-grid, .inline-grid, .summary-grid, .range-grid, .toggle-grid, .chart-control-grid, .catalog-item, .result-item, .provider-main, .item-action-row { grid-template-columns: 1fr; }
   .tab-nav { grid-template-columns: 1fr; }
 }

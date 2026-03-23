@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macro Portfolio Lab 2.0</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260318f" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260321d" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -12,7 +13,7 @@
         <div>
           <p class="eyebrow">Macro Portfolio Lab 2.0</p>
           <h1>量化研究工作台</h1>
-          <p>按阶段分页面推进。当前先把“数据获取”页做成可展开菜单、可单项更新、可一键全量拉取的研究入口。</p>
+          <p>按阶段分页面推进。当前重点打磨前两页：数据获取与数据处理，确保每一步都能看清原始输入、时间范围、交集和处理结果。</p>
         </div>
         <div class="hero-actions">
           <button id="create-run">创建新实验</button>
@@ -75,11 +76,88 @@
         </div>
       </section>
 
-      <section id="data-page" class="page"><article class="panel placeholder-panel"><h2>数据处理</h2><p>下一步单独打磨。</p></article></section>
+      <section id="data-page" class="page">
+        <div class="page-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Page 2</p>
+                <h2>数据处理</h2>
+              </div>
+              <button id="run-data">执行数据处理</button>
+            </div>
+
+            <div class="form-grid">
+              <label>US 滞后月数<input id="data-us-lag" type="number" value="1" /></label>
+              <label>CN 额外滞后<input id="data-cn-lag" type="number" value="0" /></label>
+              <label>Global 滞后<input id="data-global-lag" type="number" value="1" /></label>
+              <label>Z 窗口<input id="data-z-window" type="number" value="36" /></label>
+            </div>
+
+            <div id="data-summary" class="summary-grid">
+              <div class="hint-box">先运行这一层，或切换到一个已经成功完成 data 阶段的实验。</div>
+            </div>
+
+            <div id="data-ranges" class="section-gap">
+              <div class="hint-box">这里会显示各组数据的时间范围和时间交集。</div>
+            </div>
+
+            <div class="group-head section-gap">
+              <div>
+                <p class="eyebrow">Chart</p>
+                <h3>分组图表</h3>
+                <p>横轴可切换时间粒度，勾选你想展示的序列。同类数据会自动放在同一张图。</p>
+              </div>
+            </div>
+
+            <div class="section-gap chart-control-grid">
+              <label>图表分组
+                <select id="data-chart-group">
+                  <option value="stocks">股票类</option>
+                  <option value="bonds">债券类</option>
+                  <option value="alts">其他资产</option>
+                  <option value="us_macro">美国宏观</option>
+                  <option value="cn_macro">中国宏观</option>
+                </select>
+              </label>
+              <label>时间粒度
+                <select id="data-chart-frequency">
+                  <option value="day">日</option>
+                  <option value="month">月</option>
+                  <option value="quarter">季</option>
+                  <option value="year">年</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="data-series-toggles" class="toggle-grid section-gap">
+              <div class="hint-box">运行 data 后可勾选要展示的序列。</div>
+            </div>
+
+            <div class="preview-card">
+              <canvas id="data-chart" height="120"></canvas>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Run Status</p>
+                <h2>处理结果</h2>
+              </div>
+            </div>
+            <div id="data-status" class="status-line"></div>
+            <div class="folder-actions">
+              <button id="open-data-folder" class="secondary-button">在本地打开 Data 文件夹</button>
+            </div>
+            <pre id="data-log" class="stage-log"></pre>
+          </article>
+        </div>
+      </section>
       <section id="regime-page" class="page"><article class="panel placeholder-panel"><h2>状态识别</h2><p>下一步单独打磨。</p></article></section>
       <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
       <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
     </main>
-    <script src="/static/app.js?v=20260318f" type="module"></script>
+    <script src="/static/app.js?v=20260321d" type="module"></script>
   </body>
 </html>
