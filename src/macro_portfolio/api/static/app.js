@@ -749,18 +749,33 @@ function aggregateRows(rows, seriesNames, frequency) {
     if (!buckets.has(key)) buckets.set(key, { label: key, values: {}, counts: {} });
     const bucket = buckets.get(key);
     for (const name of seriesNames) {
+      if (row[name] == null || row[name] === "") continue;
       const value = Number(row[name]);
       if (!Number.isFinite(value)) continue;
       bucket.values[name] = (bucket.values[name] || 0) + value;
       bucket.counts[name] = (bucket.counts[name] || 0) + 1;
     }
   }
-  return Array.from(buckets.values())
+  const sorted = Array.from(buckets.values())
     .sort((a, b) => a.label.localeCompare(b.label))
     .map((bucket) => ({
       label: bucket.label,
       values: Object.fromEntries(seriesNames.map((name) => [name, bucket.counts[name] ? bucket.values[name] / bucket.counts[name] : null])),
     }));
+
+  // Forward-fill null buckets so sparse-frequency series (quarterly GDP, etc.)
+  // show as a step function rather than gaps in the chart.
+  const lastSeen = {};
+  for (const bucket of sorted) {
+    for (const name of seriesNames) {
+      if (bucket.values[name] != null) {
+        lastSeen[name] = bucket.values[name];
+      } else if (lastSeen[name] != null) {
+        bucket.values[name] = lastSeen[name];
+      }
+    }
+  }
+  return sorted;
 }
 
 function bucketKey(date, frequency) {

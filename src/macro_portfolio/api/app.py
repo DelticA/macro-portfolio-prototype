@@ -129,6 +129,23 @@ def get_artifact(run_id: str, stage: str, name: str):
     json_path = stage_dir / f"{name}.json"
     if csv_path.exists():
         frame = read_frame(csv_path)
+        # Apply forward fill for display artifacts so that sparse-frequency data
+        # (e.g. quarterly GDP, monthly macro in daily-index frames) shows as a
+        # step function rather than gaps or zeros in the frontend charts.
+        # Skip returns/panel data that legitimately contains NaN.
+        _FLOW_ARTIFACTS = {"asset_returns", "asset_panel"}
+        if name not in _FLOW_ARTIFACTS:
+            numeric_cols = frame.select_dtypes(include="number").columns
+            # Replace exact 0.0 only for known sparse indicators that never truly equal 0
+            # (all non-price, non-spread macro series). Price/spread columns are left as-is.
+            _PRICE_LIKE = {"USDCNY", "CNYUSD", "term_spread", "trade_balance"}
+            fill_zero_cols = [c for c in numeric_cols if c not in _PRICE_LIKE]
+            frame[fill_zero_cols] = frame[fill_zero_cols].replace(0.0, float("nan"))
+            # Resample to a regular monthly index if the frame has a datetime index
+            # so that gaps between quarterly releases are filled
+            if isinstance(frame.index, pd.DatetimeIndex):
+                frame = frame.resample("ME").last()
+            frame[numeric_cols] = frame[numeric_cols].ffill()
         preview_frame = frame.reset_index()
         return {
             "name": name,

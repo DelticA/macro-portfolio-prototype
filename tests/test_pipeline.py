@@ -109,9 +109,9 @@ def build_pipeline_inputs():
 def test_release_lag_prevents_lookahead():
     index = pd.date_range("2020-01-31", periods=15, freq="ME")
     dataset = MacroDataset(release_lag_months=1)
-    features = dataset.build_feature_table({"US": pd.DataFrame({"ip": np.arange(15)}, index=index)})
+    features = dataset.build_feature_table({"US": pd.DataFrame({"ip": np.arange(1, 16)}, index=index)})
     assert pd.isna(features.loc[pd.Timestamp("2020-01-31"), "us_ip_level"])
-    assert features.loc[pd.Timestamp("2020-02-29"), "us_ip_level"] == 0
+    assert features.loc[pd.Timestamp("2020-02-29"), "us_ip_level"] == 1
 
 
 def test_cn_release_month_uses_release_date_without_extra_month_lag():

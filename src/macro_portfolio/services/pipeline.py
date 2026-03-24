@@ -51,6 +51,13 @@ class PipelineService:
                 self.run_store.log(run_id, stage, f"Fetched {item_id}")
 
             us_macro, cn_macro, global_prices, cn_assets = self._assemble_provider_artifacts(items_dir, item_definitions)
+            
+            # Forward fill missing values so UI charts don't show gaps or periodic drops
+            us_macro = us_macro.resample("ME").last().ffill()
+            cn_macro = cn_macro.resample("ME").last().ffill()
+            global_prices = global_prices.ffill()
+            cn_assets = cn_assets.ffill()
+
             write_frame(us_macro, stage_dir / "us_macro.csv")
             write_frame(cn_macro, stage_dir / "cn_macro.csv")
             write_frame(global_prices, stage_dir / "global_prices.csv")

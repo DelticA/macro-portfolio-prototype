@@ -24,6 +24,7 @@ class MacroDataset:
             regional = frame.copy().sort_index()
             regional.index = pd.to_datetime(regional.index).to_period("M").to_timestamp("M")
             regional = regional[~regional.index.duplicated(keep="last")]
+            regional = regional.resample("ME").last().ffill()
             regional = regional.shift(self._lag_for_region(region))
             regional = self._feature_engineer(regional, prefix=region.lower())
             aligned.append(regional)
@@ -33,6 +34,7 @@ class MacroDataset:
             global_aligned = global_features.copy().sort_index()
             global_aligned.index = pd.to_datetime(global_aligned.index).to_period("M").to_timestamp("M")
             global_aligned = global_aligned[~global_aligned.index.duplicated(keep="last")]
+            global_aligned = global_aligned.resample("ME").last().ffill()
             global_aligned = global_aligned.shift(self._lag_for_region("GLOBAL"))
             merged = merged.join(self._feature_engineer(global_aligned, prefix="global"), how="outer")
 
