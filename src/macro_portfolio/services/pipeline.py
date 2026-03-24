@@ -117,6 +117,8 @@ class PipelineService:
                 "raw": _intersection_summary(summary["raw_datasets"]),
                 "processed": _intersection_summary(summary["processed_datasets"]),
             }
+            summary["timeline"] = _build_timeline(us_macro, cn_macro, global_prices, cn_assets)
+            summary["series_groups"] = _build_series_groups(us_macro, cn_macro, global_prices, cn_assets)
             write_json(summary, stage_dir / "summary.json")
             self.run_store.log(run_id, stage, f"Data stage produced {len(features)} feature rows")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
@@ -711,3 +713,98 @@ def _infer_quote_unit(symbol: str) -> str:
     if symbol.endswith(".SH") or symbol.endswith(".SZ"):
         return "CNY"
     return "USD"
+
+
+# ---------------------------------------------------------------------------
+# Timeline and series-group helpers
+# ---------------------------------------------------------------------------
+
+_SERIES_GROUP_MAP: dict[str, str] = {
+    # US macro
+    "ip": "growth", "payroll": "growth", "unemployment": "growth",
+    "cpi": "inflation", "core_cpi": "inflation", "breakeven_5y": "inflation",
+    "m2": "money_supply",
+    "fed_funds": "rates", "yield_10y": "rates", "yield_2y": "rates", "term_spread": "rates",
+    # CN macro
+    "pmi": "growth", "non_man_pmi": "growth", "industrial": "growth", "gdp": "growth",
+    "exports_yoy": "trade", "imports_yoy": "trade", "trade_balance": "trade",
+    "retail_sales": "growth",
+    "cn_cpi": "inflation", "cn_ppi": "inflation",
+    "cn_m2": "money_supply", "new_credit": "credit",
+    # Assets / prices
+    "SPY": "asset_price", "QQQ": "asset_price", "TLT": "asset_price",
+    "GLD": "asset_price", "SLV": "asset_price", "DBC": "asset_price",
+    "USO": "asset_price", "BTC": "asset_price",
+    "CSI300": "asset_price", "STAR50": "asset_price", "CGB": "asset_price",
+    "HSI_HK": "asset_price", "HSTECH_HK": "asset_price",
+    "USDCNY": "fx",
+}
+
+_GROUP_LABELS: dict[str, str] = {
+    "asset_price": "资产价格",
+    "rates": "利率 & 期限利差",
+    "growth": "成长性指标",
+    "inflation": "通胀指标",
+    "money_supply": "货币供应",
+    "trade": "贸易指标",
+    "credit": "信贷指标",
+    "fx": "汇率",
+    "other": "其他",
+}
+
+
+def _build_series_groups(
+    us_macro: pd.DataFrame,
+    cn_macro: pd.DataFrame,
+    global_prices: pd.DataFrame,
+    cn_assets: pd.DataFrame,
+) -> dict[str, str]:
+    """Return {column_name: group_key} for all available columns."""
+    result: dict[str, str] = {}
+    for col in list(us_macro.columns) + list(cn_macro.columns):
+        result[col] = _SERIES_GROUP_MAP.get(col, "other")
+    for col in list(global_prices.columns) + list(cn_assets.columns):
+        result[col] = _SERIES_GROUP_MAP.get(col, "asset_price")
+    return result
+
+
+def _build_timeline(
+    us_macro: pd.DataFrame,
+    cn_macro: pd.DataFrame,
+    global_prices: pd.DataFrame,
+    cn_assets: pd.DataFrame,
+) -> dict:
+    """Return a month-by-source coverage matrix for the alignment table."""
+    sources = {
+        "us_macro": us_macro,
+        "cn_macro": cn_macro,
+        "global_prices": global_prices,
+        "cn_assets": cn_assets,
+    }
+    all_months: list[pd.Period] = []
+    monthly_index: dict[str, pd.PeriodIndex] = {}
+    for name, frame in sources.items():
+        if frame.empty:
+            monthly_index[name] = pd.PeriodIndex([], freq="M")
+            continue
+        try:
+            idx = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
+            periods = idx.to_period("M").dropna().unique()
+        except Exception:
+            periods = pd.PeriodIndex([], freq="M")
+        monthly_index[name] = periods
+        all_months.extend(periods.tolist())
+    if not all_months:
+        return {"sources": list(sources.keys()), "months": [], "coverage": {}}
+    all_unique = sorted(set(all_months))
+    month_strs = [str(m) for m in all_unique]
+    coverage: dict[str, list[bool]] = {}
+    for name, periods in monthly_index.items():
+        period_set = set(periods)
+        coverage[name] = [m in period_set for m in all_unique]
+    return {
+        "sources": list(sources.keys()),
+        "months": month_strs,
+        "coverage": coverage,
+        "group_labels": _GROUP_LABELS,
+    }

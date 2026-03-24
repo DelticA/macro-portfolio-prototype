@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: macro-portfolio
+Version: 0.1.0
+Summary: Macro regime-aware permanent portfolio prototype for US and China assets
+Requires-Python: >=3.11
+Requires-Dist: fastapi<0.129,>=0.128
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2
+Requires-Dist: scikit-learn>=1.5
+Requires-Dist: scipy>=1.14
+Requires-Dist: uvicorn<0.41,>=0.40
+Provides-Extra: openbb
+Requires-Dist: openbb>=4.7; extra == "openbb"

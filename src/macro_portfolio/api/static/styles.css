@@ -573,3 +573,143 @@ pre.stage-log {
   .form-grid, .inline-grid, .summary-grid, .range-grid, .toggle-grid, .chart-control-grid, .catalog-item, .result-item, .provider-main, .item-action-row { grid-template-columns: 1fr; }
   .tab-nav { grid-template-columns: 1fr; }
 }
+
+/* ============================================================
+   TIMELINE TABLE
+   ============================================================ */
+.timeline-wrap {
+  overflow-x: auto;
+  border-radius: 14px;
+}
+
+.timeline-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+  table-layout: auto;
+  min-width: 600px;
+}
+
+.timeline-table thead th {
+  padding: 6px 4px;
+  background: rgba(20, 90, 65, 0.08);
+  color: var(--brand);
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+  border-bottom: 2px solid var(--line);
+}
+
+.tl-source-col {
+  min-width: 160px;
+  text-align: left !important;
+  padding-left: 10px !important;
+}
+
+.tl-source-label {
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text);
+  background: rgba(255,255,255,.6);
+}
+
+.tl-head-cell {
+  min-width: 22px;
+  max-width: 36px;
+}
+
+.tl-cell {
+  height: 22px;
+  border: 1px solid rgba(0,0,0,.06);
+  transition: opacity .1s;
+}
+
+.tl-yes { opacity: 1; }
+.tl-no { background: rgba(0,0,0,.03); }
+
+/* ============================================================
+   CHART GROUP CARDS
+   ============================================================ */
+.chart-group-card {
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(255,255,255,.80);
+  border: 1px solid var(--line);
+}
+
+.chart-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chart-group-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.chart-wrap {
+  position: relative;
+  height: 320px;
+  margin-top: 8px;
+}
+
+.chart-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ============================================================
+   HANDOFF BAR
+   ============================================================ */
+.handoff-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  padding: 16px 20px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(20, 90, 65, 0.16), rgba(20, 90, 65, 0.06));
+  border: 1.5px solid rgba(20, 90, 65, 0.28);
+}
+
+.handoff-bar.hidden { display: none; }
+
+.handoff-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.handoff-text strong {
+  font-size: 15px;
+  color: var(--brand);
+}
+
+.handoff-text span {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.handoff-btn {
+  background: var(--brand);
+  color: white;
+  padding: 12px 22px;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.handoff-btn:hover {
+  background: var(--brand-soft);
+}
+

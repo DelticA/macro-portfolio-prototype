@@ -1,0 +1,9 @@
+fastapi<0.129,>=0.128
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.5
+scipy>=1.14
+uvicorn<0.41,>=0.40
+
+[openbb]
+openbb>=4.7

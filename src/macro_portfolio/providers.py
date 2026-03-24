@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
+
+ssl._create_default_https_context = ssl._create_unverified_context
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path

@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macro Portfolio Lab 2.0</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260321d" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/styles.css?v=20260323" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -13,7 +13,7 @@
         <div>
           <p class="eyebrow">Macro Portfolio Lab 2.0</p>
           <h1>量化研究工作台</h1>
-          <p>按阶段分页面推进。当前重点打磨前两页：数据获取与数据处理，确保每一步都能看清原始输入、时间范围、交集和处理结果。</p>
+          <p>按阶段分页面推进：数据获取 → 数据处理 → 状态识别 → 策略决策 → 回测分析</p>
         </div>
         <div class="hero-actions">
           <button id="create-run">创建新实验</button>
@@ -29,6 +29,7 @@
         <button class="tab-button" data-tab="backtest-page">5. 回测分析</button>
       </nav>
 
+      <!-- ===== PAGE 1: PROVIDERS ===== -->
       <section id="providers-page" class="page active">
         <div class="page-grid">
           <article class="panel">
@@ -39,26 +40,18 @@
               </div>
               <button id="run-providers">一键拉取 / 更新</button>
             </div>
-
             <div class="form-grid">
               <label>开始日期<input id="providers-start-date" value="2018-01-01" /></label>
               <label>结束日期<input id="providers-end-date" value="2026-03-17" /></label>
-              <label>FRED API KEY
-                <input id="fred-api-key" placeholder="若环境中已有则自动填写" />
-              </label>
+              <label>FRED API KEY<input id="fred-api-key" placeholder="若环境中已有则自动填写" /></label>
             </div>
-
             <div id="providers-tree" class="accordion-stack">
               <div class="hint-box">正在加载数据菜单...</div>
             </div>
           </article>
-
           <article class="panel">
             <div class="panel-head">
-              <div>
-                <p class="eyebrow">Run Status</p>
-                <h2>拉取结果</h2>
-              </div>
+              <div><p class="eyebrow">Run Status</p><h2>拉取结果</h2></div>
             </div>
             <div id="providers-status" class="status-line"></div>
             <div class="folder-actions">
@@ -70,20 +63,18 @@
             <pre id="providers-log" class="stage-log"></pre>
             <div class="hint-box">
               <strong>说明</strong>
-              <div>数据预览表已从前端移除，避免右侧面板过宽。需要看原始文件时，直接点击上面的“在本地打开”。</div>
+              <div>需要看原始文件时，直接点击上面的"在本地打开"。</div>
             </div>
           </article>
         </div>
       </section>
 
+      <!-- ===== PAGE 2: DATA PROCESSING ===== -->
       <section id="data-page" class="page">
         <div class="page-grid">
           <article class="panel">
             <div class="panel-head">
-              <div>
-                <p class="eyebrow">Page 2</p>
-                <h2>数据处理</h2>
-              </div>
+              <div><p class="eyebrow">Page 2</p><h2>数据处理</h2></div>
               <button id="run-data">执行数据处理</button>
             </div>
 
@@ -94,70 +85,91 @@
               <label>Z 窗口<input id="data-z-window" type="number" value="36" /></label>
             </div>
 
+            <!-- KPI cards -->
             <div id="data-summary" class="summary-grid">
-              <div class="hint-box">先运行这一层，或切换到一个已经成功完成 data 阶段的实验。</div>
+              <div class="hint-box">先运行这一层，或切换到一个已完成 data 阶段的实验。</div>
             </div>
 
-            <div id="data-ranges" class="section-gap">
-              <div class="hint-box">这里会显示各组数据的时间范围和时间交集。</div>
+            <!-- Period alignment timeline -->
+            <div id="data-timeline" class="section-gap">
+              <div class="hint-box">运行 data 后将在此显示各数据源的时间覆盖情况。</div>
             </div>
 
-            <div class="group-head section-gap">
-              <div>
-                <p class="eyebrow">Chart</p>
-                <h3>分组图表</h3>
-                <p>横轴可切换时间粒度，勾选你想展示的序列。同类数据会自动放在同一张图。</p>
+            <!-- Split semantic-group charts -->
+            <div id="data-charts-container" class="section-gap">
+              <div class="hint-box">运行 data 后将在此显示按语义分组的多轴图表。</div>
+            </div>
+
+            <!-- Handoff CTA -->
+            <div id="data-handoff-bar" class="handoff-bar hidden">
+              <div class="handoff-text">
+                <strong>数据已对齐，特征表已构建</strong>
+                <span>可以进入下一阶段：状态识别</span>
               </div>
-            </div>
-
-            <div class="section-gap chart-control-grid">
-              <label>图表分组
-                <select id="data-chart-group">
-                  <option value="stocks">股票类</option>
-                  <option value="bonds">债券类</option>
-                  <option value="alts">其他资产</option>
-                  <option value="us_macro">美国宏观</option>
-                  <option value="cn_macro">中国宏观</option>
-                </select>
-              </label>
-              <label>时间粒度
-                <select id="data-chart-frequency">
-                  <option value="day">日</option>
-                  <option value="month">月</option>
-                  <option value="quarter">季</option>
-                  <option value="year">年</option>
-                </select>
-              </label>
-            </div>
-
-            <div id="data-series-toggles" class="toggle-grid section-gap">
-              <div class="hint-box">运行 data 后可勾选要展示的序列。</div>
-            </div>
-
-            <div class="preview-card">
-              <canvas id="data-chart" height="120"></canvas>
+              <button id="goto-regime" class="handoff-btn">进入状态识别 →</button>
             </div>
           </article>
 
           <article class="panel">
             <div class="panel-head">
-              <div>
-                <p class="eyebrow">Run Status</p>
-                <h2>处理结果</h2>
-              </div>
+              <div><p class="eyebrow">Run Status</p><h2>处理结果</h2></div>
             </div>
             <div id="data-status" class="status-line"></div>
             <div class="folder-actions">
               <button id="open-data-folder" class="secondary-button">在本地打开 Data 文件夹</button>
             </div>
+            <!-- Compact data ranges -->
+            <div id="data-ranges" class="section-gap">
+              <div class="hint-box">这里会显示各组数据的时间范围和时间交集。</div>
+            </div>
             <pre id="data-log" class="stage-log"></pre>
           </article>
         </div>
       </section>
-      <section id="regime-page" class="page"><article class="panel placeholder-panel"><h2>状态识别</h2><p>下一步单独打磨。</p></article></section>
+
+      <!-- ===== PAGE 3: REGIME ===== -->
+      <section id="regime-page" class="page">
+        <div class="page-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Page 3</p><h2>状态识别</h2></div>
+              <button id="run-regime">执行状态识别</button>
+            </div>
+            <div class="form-grid">
+              <label>模型
+                <select id="regime-model">
+                  <option value="rule_based">rule_based（规则分类）</option>
+                  <option value="kmeans">kmeans（聚类）</option>
+                  <option value="gmm">gmm（混合高斯）</option>
+                </select>
+              </label>
+              <label>平滑窗口<input id="regime-smoothing" type="number" value="3" /></label>
+              <label>状态数量<input id="regime-n-states" type="number" value="4" /></label>
+            </div>
+            <div id="regime-summary" class="summary-grid">
+              <div class="hint-box">先完成 data 阶段，再执行状态识别。</div>
+            </div>
+            <div id="regime-handoff-bar" class="handoff-bar hidden">
+              <div class="handoff-text">
+                <strong>状态识别完成</strong>
+                <span>可进入下一阶段：策略决策</span>
+              </div>
+              <button id="goto-policy" class="handoff-btn">进入策略决策 →</button>
+            </div>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Run Status</p><h2>识别结果</h2></div>
+            </div>
+            <div id="regime-status" class="status-line"></div>
+            <pre id="regime-log" class="stage-log"></pre>
+          </article>
+        </div>
+      </section>
+
       <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
       <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
     </main>
-    <script src="/static/app.js?v=20260321d" type="module"></script>
+    <script src="/static/app.js?v=20260323" type="module"></script>
   </body>
 </html>
