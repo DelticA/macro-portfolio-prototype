@@ -46,6 +46,12 @@ class DataRequest(BaseModel):
     z_window: int = 36
 
 
+class DataSelectionRequest(BaseModel):
+    start_date: str
+    end_date: str
+    display_series_ids: list[str] | None = None
+
+
 class RegimeRequest(BaseModel):
     model_name: Literal["rule_based", "kmeans", "gmm"] = "rule_based"
     smoothing_window: int = 3

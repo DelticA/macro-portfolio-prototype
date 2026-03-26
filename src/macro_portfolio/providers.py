@@ -282,6 +282,20 @@ class AkshareClient:
             axis=1,
         ).sort_index().loc[pd.Timestamp(start_date) : pd.Timestamp(end_date)]
 
+    def fetch_cn_stock_prices(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        normalized = _normalize_akshare_stock_symbol(symbol)
+        with _disabled_proxy_env():
+            frame = self.ak.stock_zh_a_hist(
+                symbol=normalized,
+                period="daily",
+                start_date=_compact_date(start_date),
+                end_date=_compact_date(end_date),
+                adjust="qfq",
+            )
+        column_name = _normalize_custom_price_column(symbol, default=normalized)
+        series = _akshare_close_series(frame, column_name)
+        return series.to_frame(name=column_name).sort_index()
+
     def fetch_cn_macro(self, aliases: list[str] | None = None) -> pd.DataFrame:
         builders = {
             "pmi": lambda: _akshare_macro_series(self.ak.macro_china_pmi_yearly(), "pmi"),
@@ -466,6 +480,20 @@ def _normalize_sina_fund_code(value: str) -> str:
     if code.startswith(("5", "6", "9")):
         return f"sh{code}"
     return f"sz{code}"
+
+
+def _normalize_akshare_stock_symbol(value: str) -> str:
+    code = str(value).strip().upper()
+    if "." in code:
+        code = code.split(".", 1)[0]
+    if code.startswith(("SH", "SZ", "BJ")):
+        code = code[2:]
+    return code
+
+
+def _normalize_custom_price_column(value: str, default: str | None = None) -> str:
+    cleaned = "".join(char.upper() if char.isalnum() else "_" for char in str(value).strip()).strip("_")
+    return cleaned or (default or "CUSTOM_EQUITY")
 
 
 def _akshare_close_series(frame: pd.DataFrame, name: str) -> pd.Series:

@@ -6,6 +6,8 @@ from urllib.request import Request
 import pandas as pd
 
 from macro_portfolio.providers import BinanceClient, FredClient, StooqClient, YahooFinanceClient
+from macro_portfolio.engine.schemas import ProvidersRequest
+from macro_portfolio.services.pipeline import _custom_provider_items
 
 
 class DummyResponse:
@@ -94,3 +96,30 @@ def test_binance_client_resamples_monthly(monkeypatch):
     client = BinanceClient()
     series = client.fetch_btc_prices("2024-01-01", "2024-02-29")
     assert series.iloc[-1] == 45000.0
+
+
+def test_custom_provider_items_respect_market_defaults():
+    request = ProvidersRequest(
+        start_date="2024-01-01",
+        end_date="2024-03-01",
+        custom_equities=[
+            {"id": "cn_stock", "label": "贵州茅台", "symbol": "600519.SH", "market": "CN"},
+            {"id": "hk_stock", "label": "腾讯", "symbol": "0700.HK", "market": "HK", "source": "openbb"},
+            {"id": "us_stock", "label": "Apple", "symbol": "AAPL", "market": "US"},
+        ],
+    )
+
+    items = _custom_provider_items(request)
+
+    assert items["cn_stock"]["artifact"] == "cn_assets.csv"
+    assert items["cn_stock"]["sources"] == ["akshare"]
+    assert items["cn_stock"]["quote_unit"] == "CNY"
+    assert items["cn_stock"]["market_label"] == "A 股"
+
+    assert items["hk_stock"]["artifact"] == "global_prices.csv"
+    assert items["hk_stock"]["sources"] == ["openbb", "yahoo"]
+    assert items["hk_stock"]["quote_unit"] == "HKD"
+
+    assert items["us_stock"]["artifact"] == "global_prices.csv"
+    assert items["us_stock"]["sources"] == ["yahoo", "openbb"]
+    assert items["us_stock"]["quote_unit"] == "USD"

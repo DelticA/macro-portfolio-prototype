@@ -11,7 +11,7 @@ from ..backtest import BacktestEngine
 from ..data import MacroDataset
 from ..engine.artifacts import read_frame, read_json, write_frame, write_json
 from ..engine.run_store import RunStore
-from ..engine.schemas import BacktestRequest, DataRequest, PolicyRequest, ProvidersRequest, RegimeRequest
+from ..engine.schemas import BacktestRequest, DataRequest, DataSelectionRequest, PolicyRequest, ProvidersRequest, RegimeRequest
 from ..live import DEFAULT_ASSETS
 from ..policy import PolicyConfig
 from ..providers import (
@@ -89,7 +89,11 @@ class PipelineService:
                 release_date_regions=frozenset({"CN"}),
                 z_window=request.z_window,
             )
-            features = dataset.build_feature_table({"US": us_macro, "CN": cn_macro})
+            global_features = pd.concat([global_prices, cn_assets], axis=1).sort_index()
+            features = dataset.build_feature_table(
+                {"US": us_macro, "CN": cn_macro},
+                global_features=global_features if not global_features.empty else None,
+            )
             merged_prices = pd.concat([global_prices.drop(columns=["USDCNY"], errors="ignore"), cn_assets], axis=1).sort_index()
             required_assets = [asset.asset for asset in DEFAULT_ASSETS]
             merged_prices = merged_prices[[column for column in merged_prices.columns if column in required_assets]]
@@ -103,31 +107,55 @@ class PipelineService:
             write_frame(features, stage_dir / "features.csv")
             write_frame(asset_panel, stage_dir / "asset_panel.csv")
             write_frame(asset_returns, stage_dir / "asset_returns.csv")
-            summary = {
-                "feature_columns": list(features.columns[:12]),
-                "feature_rows": int(len(features)),
-                "asset_panel_rows": int(len(asset_panel)),
-                "asset_names": list(asset_returns.columns),
-                "raw_datasets": {
-                    "us_macro": _frame_summary("us_macro", us_macro),
-                    "cn_macro": _frame_summary("cn_macro", cn_macro),
-                    "global_prices": _frame_summary("global_prices", global_prices),
-                    "cn_assets": _frame_summary("cn_assets", cn_assets),
-                },
-                "processed_datasets": {
-                    "features": _frame_summary("features", features),
-                    "asset_returns": _frame_summary("asset_returns", asset_returns),
-                    "asset_panel": _column_date_summary("asset_panel", asset_panel, "date"),
-                },
-            }
-            summary["intersections"] = {
-                "raw": _intersection_summary(summary["raw_datasets"]),
-                "processed": _intersection_summary(summary["processed_datasets"]),
-            }
-            summary["timeline"] = _build_timeline(us_macro, cn_macro, global_prices, cn_assets)
-            summary["series_groups"] = _build_series_groups(us_macro, cn_macro, global_prices, cn_assets)
+            self._clear_data_selection_artifacts(stage_dir)
+            provider_catalog = read_json(providers_dir / "catalog.json") if (providers_dir / "catalog.json").exists() else {}
+            summary = self._build_data_summary(us_macro, cn_macro, global_prices, cn_assets, features, asset_returns, asset_panel, provider_catalog)
             write_json(summary, stage_dir / "summary.json")
             self.run_store.log(run_id, stage, f"Data stage produced {len(features)} feature rows")
+            self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
+            return summary
+        except Exception as exc:
+            return self._fail_stage(run_id, stage, exc)
+
+    def apply_data_selection(self, run_id: str, request: DataSelectionRequest) -> dict:
+        stage = "data"
+        self._require_stage_success(run_id, stage)
+        self.run_store.log(run_id, stage, f"Applying processed-data selection {request.start_date} -> {request.end_date}")
+
+        try:
+            stage_dir = self.run_store.stage_dir(run_id, stage)
+            features = read_frame(stage_dir / "features.csv")
+            asset_returns = read_frame(stage_dir / "asset_returns.csv")
+            asset_panel = read_frame(stage_dir / "asset_panel.csv")
+            summary = read_json(stage_dir / "summary.json")
+            selection = _build_selection_payload(
+                features,
+                asset_returns,
+                request.start_date,
+                request.end_date,
+                display_series_ids=request.display_series_ids,
+                series_catalog=summary.get("series_catalog", {}),
+            )
+            selected_series = self._build_selected_series_window(
+                run_id,
+                selection.get("display_series_ids") or list((summary.get("series_catalog") or {}).keys()),
+                summary.get("series_catalog", {}),
+                selection["start"],
+                selection["end"],
+            )
+            selected_features = _slice_index_frame(features, selection["start"], selection["end"])
+            selected_feature_columns = selection.get("feature_columns") or []
+            if selected_feature_columns:
+                selected_features = selected_features[[column for column in selected_feature_columns if column in selected_features.columns]]
+            selection.update(_selection_quality_metrics(selected_series, selected_features))
+            write_frame(selected_series, stage_dir / "selected_series.csv")
+            write_frame(selected_features, stage_dir / "selected_features.csv")
+            write_frame(_slice_index_frame(asset_returns, selection["start"], selection["end"]), stage_dir / "selected_asset_returns.csv")
+            write_frame(_slice_column_frame(asset_panel, "date", selection["start"], selection["end"]), stage_dir / "selected_asset_panel.csv")
+            write_json(selection, stage_dir / "selection.json")
+
+            summary = self._refresh_data_summary_with_selection(run_id, selection)
+            self.run_store.log(run_id, stage, f"Selection saved for {selection['start']} -> {selection['end']}")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
             return summary
         except Exception as exc:
@@ -167,13 +195,17 @@ class PipelineService:
 
         try:
             self._require_stage_success(run_id, "data")
-            data_dir = self.run_store.stage_dir(run_id, "data")
-            features = read_frame(data_dir / "features.csv")
+            features, selection = self._load_data_artifact_with_selection(run_id, "features")
             if request.feature_columns:
                 selected = [column for column in request.feature_columns if column in features.columns]
                 if selected:
                     features = features[selected]
                     self.run_store.log(run_id, stage, f"Using {len(selected)} selected feature columns")
+            elif selection and selection.get("feature_columns"):
+                selected = [column for column in selection["feature_columns"] if column in features.columns]
+                if selected:
+                    features = features[selected]
+                    self.run_store.log(run_id, stage, f"Using {len(selected)} feature columns from saved data selection")
             model = build_regime_model(request.model_name, smoothing_window=request.smoothing_window, n_states=request.n_states)
             regime = model.fit_predict(features)
 
@@ -182,6 +214,8 @@ class PipelineService:
             diagnostics = model.diagnostics().details
             diagnostics["available_models"] = ["rule_based", "kmeans", "gmm"]
             diagnostics["counts"] = regime["portfolio_regime"].value_counts().to_dict()
+            if selection:
+                diagnostics["selection"] = selection
             write_json(diagnostics, stage_dir / "diagnostics.json")
             summary = {
                 "model_name": request.model_name,
@@ -189,6 +223,8 @@ class PipelineService:
                 "latest_confidence": float(regime["regime_confidence"].iloc[-1]),
                 "counts": diagnostics["counts"],
             }
+            if selection:
+                summary["selection"] = selection
             write_json(summary, stage_dir / "summary.json")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
             return summary
@@ -203,7 +239,7 @@ class PipelineService:
         try:
             self._require_stage_success(run_id, "data")
             self._require_stage_success(run_id, "regime")
-            asset_returns = read_frame(self.run_store.stage_dir(run_id, "data") / "asset_returns.csv")
+            asset_returns, selection = self._load_data_artifact_with_selection(run_id, "asset_returns")
             regime = read_frame(self.run_store.stage_dir(run_id, "regime") / "regime.csv")
             config = self._policy_config(request.overrides)
             model = build_policy_model(request.model_name, DEFAULT_ASSETS, config)
@@ -228,6 +264,8 @@ class PipelineService:
                 "latest_regime": str(latest_signal["portfolio_regime"]),
                 "top_weights": frame.sort_values("target_weight", ascending=False).head(5).to_dict(orient="records"),
             }
+            if selection:
+                summary["selection"] = selection
             write_json(summary, stage_dir / "summary.json")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
             return summary
@@ -242,7 +280,7 @@ class PipelineService:
         try:
             self._require_stage_success(run_id, "data")
             self._require_stage_success(run_id, "regime")
-            asset_returns = read_frame(self.run_store.stage_dir(run_id, "data") / "asset_returns.csv")
+            asset_returns, selection = self._load_data_artifact_with_selection(run_id, "asset_returns")
             regime = read_frame(self.run_store.stage_dir(run_id, "regime") / "regime.csv")
             policy_config = self._policy_config(request.overrides)
             model = build_policy_model(request.model_name, DEFAULT_ASSETS, policy_config)
@@ -265,11 +303,152 @@ class PipelineService:
                 "metrics": {key: float(value) for key, value in result.metrics.to_dict().items()},
                 "nav_rows": int(len(result.nav)),
             }
+            if selection:
+                summary["selection"] = selection
             write_json(summary, stage_dir / "summary.json")
             self.run_store.mark_stage(run_id, stage, "success", {"summary": summary})
             return summary
         except Exception as exc:
             return self._fail_stage(run_id, stage, exc)
+
+    def _build_data_summary(
+        self,
+        us_macro: pd.DataFrame,
+        cn_macro: pd.DataFrame,
+        global_prices: pd.DataFrame,
+        cn_assets: pd.DataFrame,
+        features: pd.DataFrame,
+        asset_returns: pd.DataFrame,
+        asset_panel: pd.DataFrame,
+        provider_catalog: dict,
+    ) -> dict:
+        series_catalog = _build_series_catalog(us_macro, cn_macro, global_prices, cn_assets, provider_catalog)
+        summary = {
+            "feature_columns": list(features.columns[:12]),
+            "feature_rows": int(len(features)),
+            "asset_panel_rows": int(len(asset_panel)),
+            "asset_names": list(asset_returns.columns),
+            "raw_datasets": {
+                "us_macro": _frame_summary("us_macro", us_macro),
+                "cn_macro": _frame_summary("cn_macro", cn_macro),
+                "global_prices": _frame_summary("global_prices", global_prices),
+                "cn_assets": _frame_summary("cn_assets", cn_assets),
+            },
+            "processed_datasets": {
+                "features": _frame_summary("features", features),
+                "asset_returns": _frame_summary("asset_returns", asset_returns),
+                "asset_panel": _column_date_summary("asset_panel", asset_panel, "date"),
+            },
+        }
+        summary["intersections"] = {
+            "raw": _intersection_summary(summary["raw_datasets"]),
+            "processed": _intersection_summary(summary["processed_datasets"]),
+        }
+        summary["timeline"] = _build_timeline(us_macro, cn_macro, global_prices, cn_assets)
+        summary["series_catalog"] = series_catalog
+        summary["series_groups"] = {series_id: item["group"] for series_id, item in series_catalog.items()}
+        summary["selection"] = {
+            "available_range": _available_selection_range(features, asset_returns),
+            "applied_range": None,
+            "applied_display_series_ids": [],
+            "applied_feature_columns": [],
+            "applied_unmapped_series_ids": [],
+            "coverage": {
+                "raw_missing_ratio": None,
+                "feature_missing_ratio": None,
+                "selected_series_count": 0,
+            },
+            "active_artifacts": {"features": "features.csv", "asset_returns": "asset_returns.csv", "asset_panel": "asset_panel.csv"},
+        }
+        return summary
+
+    def _refresh_data_summary_with_selection(self, run_id: str, selection: dict) -> dict:
+        stage_dir = self.run_store.stage_dir(run_id, "data")
+        summary = read_json(stage_dir / "summary.json")
+        selected_series = read_frame(stage_dir / "selected_series.csv")
+        selected_features = read_frame(stage_dir / "selected_features.csv")
+        selected_asset_returns = read_frame(stage_dir / "selected_asset_returns.csv")
+        selected_asset_panel = read_frame(stage_dir / "selected_asset_panel.csv")
+        summary["selection"] = {
+            "available_range": _available_selection_range(
+                read_frame(stage_dir / "features.csv"),
+                read_frame(stage_dir / "asset_returns.csv"),
+            ),
+            "applied_range": {"start": selection["start"], "end": selection["end"]},
+            "applied_display_series_ids": selection.get("display_series_ids", []),
+            "applied_feature_columns": selection.get("feature_columns", []),
+            "applied_unmapped_series_ids": selection.get("unmapped_series_ids", []),
+            "coverage": {
+                "raw_missing_ratio": selection.get("raw_missing_ratio"),
+                "feature_missing_ratio": selection.get("feature_missing_ratio"),
+                "selected_series_count": int(selected_series.shape[1]),
+            },
+            "active_artifacts": {
+                "selected_series": "selected_series.csv",
+                "features": "selected_features.csv",
+                "asset_returns": "selected_asset_returns.csv",
+                "asset_panel": "selected_asset_panel.csv",
+            },
+            "selected_rows": {
+                "selected_series": int(len(selected_series)),
+                "features": int(len(selected_features)),
+                "asset_returns": int(len(selected_asset_returns)),
+                "asset_panel": int(len(selected_asset_panel)),
+            },
+        }
+        write_json(summary, stage_dir / "summary.json")
+        return summary
+
+    def _clear_data_selection_artifacts(self, stage_dir: Path) -> None:
+        for name in ("selected_series.csv", "selected_features.csv", "selected_asset_returns.csv", "selected_asset_panel.csv", "selection.json"):
+            path = stage_dir / name
+            if path.exists():
+                path.unlink()
+
+    def _build_selected_series_window(
+        self,
+        run_id: str,
+        display_series_ids: list[str],
+        series_catalog: dict[str, dict],
+        start: str,
+        end: str,
+    ) -> pd.DataFrame:
+        providers_dir = self.run_store.stage_dir(run_id, "providers")
+        provider_frames = {
+            "us_macro": read_frame(providers_dir / "us_macro.csv") if (providers_dir / "us_macro.csv").exists() else pd.DataFrame(),
+            "cn_macro": read_frame(providers_dir / "cn_macro.csv") if (providers_dir / "cn_macro.csv").exists() else pd.DataFrame(),
+            "global_prices": read_frame(providers_dir / "global_prices.csv") if (providers_dir / "global_prices.csv").exists() else pd.DataFrame(),
+            "cn_assets": read_frame(providers_dir / "cn_assets.csv") if (providers_dir / "cn_assets.csv").exists() else pd.DataFrame(),
+        }
+        window_index = pd.date_range(pd.Timestamp(start), pd.Timestamp(end), freq="ME")
+        selected_parts: list[pd.Series] = []
+        for series_id in display_series_ids:
+            meta = series_catalog.get(series_id)
+            if not meta:
+                continue
+            artifact = meta.get("artifact")
+            column = meta.get("column")
+            if (not artifact or not column) and "::" in series_id:
+                artifact, column = series_id.split("::", 1)
+            frame = provider_frames.get(artifact or "", pd.DataFrame())
+            if frame.empty or column not in frame.columns:
+                continue
+            series = pd.to_numeric(frame[column], errors="coerce")
+            series.index = pd.to_datetime(series.index, errors="coerce").to_period("M").to_timestamp("M")
+            series = series[~series.index.duplicated(keep="last")].sort_index().resample("ME").last().ffill()
+            selected_parts.append(series.rename(series_id))
+        if not selected_parts:
+            return pd.DataFrame(index=window_index)
+        selected = pd.concat(selected_parts, axis=1).sort_index()
+        return selected.reindex(window_index)
+
+    def _load_data_artifact_with_selection(self, run_id: str, artifact: str) -> tuple[pd.DataFrame, dict | None]:
+        stage_dir = self.run_store.stage_dir(run_id, "data")
+        selected_path = stage_dir / f"selected_{artifact}.csv"
+        selection_path = stage_dir / "selection.json"
+        if selected_path.exists() and selection_path.exists():
+            return read_frame(selected_path), read_json(selection_path)
+        return read_frame(stage_dir / f"{artifact}.csv"), None
 
     def get_stage_payload(self, run_id: str, stage: str) -> dict:
         stage_dir = self.run_store.stage_dir(run_id, stage)
@@ -339,7 +518,7 @@ class PipelineService:
         if kind == "cn_asset":
             return self._fetch_cn_asset_item(item["column"], request)
         if kind == "custom_equity":
-            return self._fetch_generic_equity_item(item["column"], item["symbol"], source, request)
+            return self._fetch_custom_equity_item(item, source, request)
         if kind == "crypto":
             return self._fetch_crypto_item(source, request)
         if kind == "fx":
@@ -390,6 +569,15 @@ class PipelineService:
         except Exception:
             return OpenBBClient().fetch_price_history({column: symbol}, start_date=request.start_date, end_date=request.end_date, asset_class="equity")
 
+    def _fetch_custom_equity_item(self, item: dict, source: str, request: ProvidersRequest) -> pd.DataFrame:
+        market = item.get("market", "US")
+        if market == "CN":
+            frame = AkshareClient().fetch_cn_stock_prices(item["symbol"], request.start_date, request.end_date)
+            if len(frame.columns):
+                frame = frame.rename(columns={frame.columns[0]: item["column"]})
+            return frame
+        return self._fetch_generic_equity_item(item["column"], item["symbol"], source, request)
+
     def _fetch_crypto_item(self, source: str, request: ProvidersRequest) -> pd.DataFrame:
         if source == "openbb":
             return OpenBBClient().fetch_price_history({"BTC": "BTC-USD"}, start_date=request.start_date, end_date=request.end_date, asset_class="crypto").resample("ME").last()
@@ -416,13 +604,13 @@ class PipelineService:
             if not path.exists():
                 continue
             frame = read_frame(path)
-            if item["kind"] == "us_macro":
+            if item["artifact"] == "us_macro.csv":
                 us_macro_parts.append(frame)
-            elif item["kind"] == "cn_macro":
+            elif item["artifact"] == "cn_macro.csv":
                 cn_macro_parts.append(frame)
-            elif item["kind"] in {"us_asset", "hk_asset", "custom_equity", "crypto", "fx"}:
+            elif item["artifact"] == "global_prices.csv":
                 global_price_parts.append(frame)
-            elif item["kind"] == "cn_asset":
+            elif item["artifact"] == "cn_assets.csv":
                 cn_asset_parts.append(frame)
         return (
             pd.concat(us_macro_parts, axis=1).sort_index() if us_macro_parts else pd.DataFrame(),
@@ -607,20 +795,23 @@ def _custom_provider_items(request: ProvidersRequest) -> dict[str, dict]:
             continue
         item_id = str(raw.get("id", "")).strip() or f"custom_{_safe_custom_id(symbol)}"
         label = str(raw.get("label", "")).strip() or symbol
-        source = str(raw.get("source", "yahoo")).strip() or "yahoo"
+        market = _normalize_custom_market(raw.get("market"))
+        source = _normalize_custom_source(str(raw.get("source", _default_custom_source(market))).strip() or _default_custom_source(market), market)
         items[item_id] = {
             "id": item_id,
             "label": label,
             "group": "股票",
             "category": "资产数据",
-            "artifact": "global_prices.csv",
-            "column": item_id.upper(),
+            "artifact": "cn_assets.csv" if market == "CN" else "global_prices.csv",
+            "column": _custom_item_column(item_id, market),
             "symbol": symbol,
             "kind": "custom_equity",
+            "market": market,
+            "market_label": _custom_market_label(market),
             "source_field": "custom_equity_source",
-            "sources": [source] if source == "openbb" else ["yahoo", "openbb"],
-            "quote_unit": _infer_quote_unit(symbol),
-            "research_note": "按当前 run 自定义添加。",
+            "sources": _custom_market_sources(market, source),
+            "quote_unit": _custom_market_quote_unit(market, symbol),
+            "research_note": _custom_market_research_note(market),
             "code_field": None,
             "code_label": None,
             "is_custom": True,
@@ -659,7 +850,10 @@ def _provider_item_payload(item_id: str, items_dir: Path, request: ProvidersRequ
     payload["code_value"] = getattr(request, item["code_field"]) if item.get("code_field") else None
     payload["code_label"] = item.get("code_label")
     payload["symbol"] = item.get("symbol")
+    payload["kind"] = item.get("kind")
     payload["is_custom"] = item.get("is_custom", False)
+    payload["market"] = item.get("market")
+    payload["market_label"] = item.get("market_label")
     payload["supports_openbb"] = "openbb" in item["sources"]
     payload["last_updated"] = (
         datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
@@ -697,6 +891,104 @@ def _column_date_summary(name: str, frame: pd.DataFrame, column: str) -> dict:
     return _frame_summary(name, indexed)
 
 
+def _available_selection_range(features: pd.DataFrame, asset_returns: pd.DataFrame) -> dict:
+    start = max(features.index.min(), asset_returns.index.min()) if len(features.index) and len(asset_returns.index) else None
+    end = min(features.index.max(), asset_returns.index.max()) if len(features.index) and len(asset_returns.index) else None
+    if start is None or end is None or start > end:
+        return {"start": None, "end": None}
+    return {"start": str(start), "end": str(end)}
+
+
+def _build_selection_payload(
+    features: pd.DataFrame,
+    asset_returns: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+    *,
+    display_series_ids: list[str] | None = None,
+    series_catalog: dict[str, dict] | None = None,
+) -> dict:
+    available = _available_selection_range(features, asset_returns)
+    if not available["start"] or not available["end"]:
+        raise ValueError("No common processed date range is available for selection.")
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    available_start = pd.Timestamp(available["start"])
+    available_end = pd.Timestamp(available["end"])
+    if start > end:
+        raise ValueError("Selection start_date must be earlier than or equal to end_date.")
+    if start < available_start or end > available_end:
+        raise ValueError(f"Selection must stay within processed range {available_start.date()} -> {available_end.date()}.")
+    selection = {"start": str(start), "end": str(end)}
+    if display_series_ids:
+        selection.update(_resolve_feature_columns_for_series(features, display_series_ids, series_catalog or {}))
+    else:
+        selection.update(
+            {
+                "display_series_ids": [],
+                "mapped_series_ids": [],
+                "unmapped_series_ids": [],
+                "feature_columns": [],
+            }
+        )
+    return selection
+
+
+def _slice_index_frame(frame: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
+    return frame.loc[(frame.index >= pd.Timestamp(start)) & (frame.index <= pd.Timestamp(end))].copy()
+
+
+def _slice_column_frame(frame: pd.DataFrame, column: str, start: str, end: str) -> pd.DataFrame:
+    sliced = frame.copy()
+    dates = pd.to_datetime(sliced[column], errors="coerce")
+    mask = dates.between(pd.Timestamp(start), pd.Timestamp(end), inclusive="both")
+    return sliced.loc[mask].copy()
+
+
+def _resolve_feature_columns_for_series(
+    features: pd.DataFrame,
+    display_series_ids: list[str],
+    series_catalog: dict[str, dict],
+) -> dict[str, list[str]]:
+    unknown_series = [series_id for series_id in display_series_ids if series_id not in series_catalog]
+    if unknown_series:
+        raise ValueError(f"Unknown data series selected: {', '.join(unknown_series[:5])}")
+
+    mapped_series_ids: list[str] = []
+    unmapped_series_ids: list[str] = []
+    feature_columns: list[str] = []
+    for series_id in display_series_ids:
+        feature_prefix = series_catalog.get(series_id, {}).get("feature_prefix")
+        matched = [column for column in features.columns if feature_prefix and column.startswith(feature_prefix)]
+        if matched:
+            mapped_series_ids.append(series_id)
+            feature_columns.extend(matched)
+        else:
+            unmapped_series_ids.append(series_id)
+
+    feature_columns = list(dict.fromkeys(feature_columns))
+    if display_series_ids and not feature_columns:
+        raise ValueError("Selected data items are display-only and cannot be used by the third stage. Please include at least one macro feature series.")
+
+    return {
+        "display_series_ids": list(dict.fromkeys(display_series_ids)),
+        "mapped_series_ids": mapped_series_ids,
+        "unmapped_series_ids": unmapped_series_ids,
+        "feature_columns": feature_columns,
+    }
+
+
+def _selection_quality_metrics(selected_series: pd.DataFrame, selected_features: pd.DataFrame) -> dict[str, float | int]:
+    raw_missing_ratio = float(selected_series.isna().mean().mean()) if not selected_series.empty else 0.0
+    feature_missing_ratio = float(selected_features.isna().mean().mean()) if not selected_features.empty else 0.0
+    return {
+        "selected_series_rows": int(len(selected_series)),
+        "selected_series_columns": int(selected_series.shape[1]),
+        "raw_missing_ratio": raw_missing_ratio,
+        "feature_missing_ratio": feature_missing_ratio,
+    }
+
+
 def _intersection_summary(datasets: dict[str, dict]) -> dict:
     starts = [pd.Timestamp(item["start"]) for item in datasets.values() if item.get("start")]
     ends = [pd.Timestamp(item["end"]) for item in datasets.values() if item.get("end")]
@@ -722,29 +1014,93 @@ def _infer_quote_unit(symbol: str) -> str:
     return "USD"
 
 
+def _normalize_custom_market(value: object) -> str:
+    market = str(value or "US").strip().upper()
+    if market not in {"CN", "HK", "US"}:
+        return "US"
+    return market
+
+
+def _custom_market_label(market: str) -> str:
+    return {"CN": "A 股", "HK": "港股", "US": "美股"}.get(market, "美股")
+
+
+def _default_custom_source(market: str) -> str:
+    return "akshare" if market == "CN" else "yahoo"
+
+
+def _normalize_custom_source(source: str, market: str) -> str:
+    if market == "CN":
+        return "akshare"
+    return source if source in {"yahoo", "openbb"} else "yahoo"
+
+
+def _custom_market_sources(market: str, source: str) -> list[str]:
+    if market == "CN":
+        return ["akshare"]
+    if source == "openbb":
+        return ["openbb", "yahoo"]
+    return ["yahoo", "openbb"]
+
+
+def _custom_market_quote_unit(market: str, symbol: str) -> str:
+    if market == "CN":
+        return "CNY"
+    if market == "HK":
+        return "HKD"
+    return _infer_quote_unit(symbol)
+
+
+def _custom_market_research_note(market: str) -> str:
+    notes = {
+        "CN": "按当前 run 自定义添加的 A 股个股，使用 Akshare 日线前复权收盘价。",
+        "HK": "按当前 run 自定义添加的港股个股，默认使用 Yahoo / OpenBB。",
+        "US": "按当前 run 自定义添加的美股个股，默认使用 Yahoo / OpenBB。",
+    }
+    return notes.get(market, "按当前 run 自定义添加。")
+
+
+def _custom_item_column(item_id: str, market: str) -> str:
+    return f"{market}_{item_id}".upper()
+
+
 # ---------------------------------------------------------------------------
 # Timeline and series-group helpers
 # ---------------------------------------------------------------------------
 
-_SERIES_GROUP_MAP: dict[str, str] = {
-    # US macro
-    "ip": "growth", "payroll": "growth", "unemployment": "growth",
-    "cpi": "inflation", "core_cpi": "inflation", "breakeven_5y": "inflation",
-    "m2": "money_supply",
-    "fed_funds": "rates", "yield_10y": "rates", "yield_2y": "rates", "term_spread": "rates",
-    # CN macro
-    "pmi": "growth", "non_man_pmi": "growth", "industrial": "growth", "gdp": "growth",
-    "exports_yoy": "trade", "imports_yoy": "trade", "trade_balance": "trade",
-    "retail_sales": "growth",
-    "cn_cpi": "inflation", "cn_ppi": "inflation",
-    "cn_m2": "money_supply", "new_credit": "credit",
-    # Assets / prices
-    "SPY": "asset_price", "QQQ": "asset_price", "TLT": "asset_price",
-    "GLD": "asset_price", "SLV": "asset_price", "DBC": "asset_price",
-    "USO": "asset_price", "BTC": "asset_price",
-    "CSI300": "asset_price", "STAR50": "asset_price", "CGB": "asset_price",
-    "HSI_HK": "asset_price", "HSTECH_HK": "asset_price",
-    "USDCNY": "fx",
+_ARTIFACT_SERIES_GROUP_MAP: dict[str, dict[str, str]] = {
+    "us_macro": {
+        "ip": "growth",
+        "payroll": "growth",
+        "unemployment": "growth",
+        "cpi": "inflation",
+        "core_cpi": "inflation",
+        "breakeven_5y": "inflation",
+        "m2": "money_supply",
+        "fed_funds": "rates",
+        "yield_10y": "rates",
+        "yield_2y": "rates",
+        "term_spread": "rates",
+        "USDCNY": "fx",
+    },
+    "cn_macro": {
+        "pmi": "growth",
+        "non_man_pmi": "growth",
+        "industrial": "growth",
+        "gdp": "growth",
+        "retail_sales": "growth",
+        "cpi": "inflation",
+        "ppi": "inflation",
+        "m2": "money_supply",
+        "new_credit": "credit",
+        "exports_yoy": "trade",
+        "imports_yoy": "trade",
+        "trade_balance": "trade",
+    },
+    "global_prices": {
+        "USDCNY": "fx",
+    },
+    "cn_assets": {},
 }
 
 _GROUP_LABELS: dict[str, str] = {
@@ -759,6 +1115,83 @@ _GROUP_LABELS: dict[str, str] = {
     "other": "其他",
 }
 
+_SERIES_SOURCE_LABELS: dict[str, str] = {
+    "us_macro": "美国宏观",
+    "cn_macro": "中国宏观",
+    "global_prices": "全球价格",
+    "cn_assets": "中国资产",
+}
+
+
+def _series_id(artifact: str, column: str) -> str:
+    return f"{artifact}::{column}"
+
+
+def _series_group_for(artifact: str, column: str) -> str:
+    if artifact in {"global_prices", "cn_assets"}:
+        return _ARTIFACT_SERIES_GROUP_MAP.get(artifact, {}).get(column, "asset_price")
+    return _ARTIFACT_SERIES_GROUP_MAP.get(artifact, {}).get(column, "other")
+
+
+def _series_feature_prefix(artifact: str, column: str) -> str | None:
+    if artifact == "us_macro":
+        return f"us_{column}_"
+    if artifact == "cn_macro":
+        return f"cn_{column}_"
+    if artifact in {"global_prices", "cn_assets"}:
+        return f"global_{column}_"
+    return None
+
+
+def _flatten_catalog_items(provider_catalog: dict) -> list[dict]:
+    return [item for group in provider_catalog.get("categories", []) for item in group.get("items", [])]
+
+
+def _build_series_catalog(
+    us_macro: pd.DataFrame,
+    cn_macro: pd.DataFrame,
+    global_prices: pd.DataFrame,
+    cn_assets: pd.DataFrame,
+    provider_catalog: dict,
+) -> dict[str, dict]:
+    provider_items = {
+        (str(item.get("artifact", "")).replace(".csv", ""), item.get("column")): item
+        for item in _flatten_catalog_items(provider_catalog)
+    }
+    artifacts = {
+        "us_macro": us_macro,
+        "cn_macro": cn_macro,
+        "global_prices": global_prices,
+        "cn_assets": cn_assets,
+    }
+    catalog: dict[str, dict] = {}
+    for artifact, frame in artifacts.items():
+        for column in frame.columns:
+            provider_item = provider_items.get((artifact, column), {})
+            group = _series_group_for(artifact, column)
+            series_id = _series_id(artifact, column)
+            label = provider_item.get("label") or column
+            short_label = provider_item.get("symbol") or column
+            feature_prefix = _series_feature_prefix(artifact, column)
+            catalog[series_id] = {
+                "id": series_id,
+                "artifact": artifact,
+                "column": column,
+                "label": label,
+                "short_label": short_label,
+                "symbol": provider_item.get("symbol"),
+                "group": group,
+                "group_label": _GROUP_LABELS.get(group, group),
+                "source_label": _SERIES_SOURCE_LABELS.get(artifact, artifact),
+                "quote_unit": provider_item.get("quote_unit"),
+                "kind": provider_item.get("kind"),
+                "market": provider_item.get("market"),
+                "market_label": provider_item.get("market_label"),
+                "mappable_to_regime": feature_prefix is not None,
+                "feature_prefix": feature_prefix,
+            }
+    return catalog
+
 
 def _build_series_groups(
     us_macro: pd.DataFrame,
@@ -766,12 +1199,16 @@ def _build_series_groups(
     global_prices: pd.DataFrame,
     cn_assets: pd.DataFrame,
 ) -> dict[str, str]:
-    """Return {column_name: group_key} for all available columns."""
+    """Return {series_id: group_key} for all available columns."""
     result: dict[str, str] = {}
-    for col in list(us_macro.columns) + list(cn_macro.columns):
-        result[col] = _SERIES_GROUP_MAP.get(col, "other")
-    for col in list(global_prices.columns) + list(cn_assets.columns):
-        result[col] = _SERIES_GROUP_MAP.get(col, "asset_price")
+    for artifact, frame in {
+        "us_macro": us_macro,
+        "cn_macro": cn_macro,
+        "global_prices": global_prices,
+        "cn_assets": cn_assets,
+    }.items():
+        for col in frame.columns:
+            result[_series_id(artifact, col)] = _series_group_for(artifact, col)
     return result
 
 

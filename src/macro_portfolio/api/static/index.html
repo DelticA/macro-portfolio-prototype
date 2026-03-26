@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macro Portfolio Lab 2.0</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260323" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260403" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -40,20 +40,40 @@
               </div>
               <button id="run-providers">一键拉取 / 更新</button>
             </div>
-            <div class="form-grid">
-              <label>开始日期<input id="providers-start-date" value="2018-01-01" /></label>
-              <label>结束日期<input id="providers-end-date" value="2026-03-17" /></label>
-              <label>FRED API KEY<input id="fred-api-key" placeholder="若环境中已有则自动填写" /></label>
+            <div id="providers-ribbon" class="section-gap">
+              <div class="hint-box">当前实验、拉取区间和 provider 覆盖概况会显示在这里。</div>
+            </div>
+            <div class="control-deck section-gap">
+              <div class="form-grid">
+                <label>开始日期<input id="providers-start-date" value="2018-01-01" /></label>
+                <label>结束日期<input id="providers-end-date" value="2026-03-17" /></label>
+                <label>FRED API KEY<input id="fred-api-key" placeholder="若环境中已有则自动填写" /></label>
+              </div>
+              <div class="workspace-toolbar section-gap">
+                <label class="toolbar-search">研究检索<input id="providers-search" placeholder="搜索资产、宏观指标、代码或输出文件" /></label>
+                <div id="providers-scope" class="segmented-control">
+                  <button type="button" class="segment-button is-active" data-provider-scope="all">全部</button>
+                  <button type="button" class="segment-button" data-provider-scope="assets">资产</button>
+                  <button type="button" class="segment-button" data-provider-scope="macro">宏观</button>
+                  <button type="button" class="segment-button" data-provider-scope="custom">自定义</button>
+                </div>
+              </div>
             </div>
             <div id="providers-tree" class="accordion-stack">
               <div class="hint-box">正在加载数据菜单...</div>
             </div>
           </article>
-          <article class="panel">
+          <article class="panel sticky-panel">
             <div class="panel-head">
               <div><p class="eyebrow">Run Status</p><h2>拉取结果</h2></div>
             </div>
             <div id="providers-status" class="status-line"></div>
+            <div id="providers-overview" class="summary-grid compact-grid">
+              <div class="hint-box">这里会显示 provider 成功率、覆盖范围和来源分布。</div>
+            </div>
+            <div id="providers-spotlight" class="section-gap">
+              <div class="hint-box">这里会显示最新更新项、失败项和研究提示。</div>
+            </div>
             <div class="folder-actions">
               <select id="providers-copy-source"></select>
               <button id="load-providers-from-run" class="secondary-button">从已有实验载入已拉取数据</button>
@@ -84,6 +104,9 @@
               <label>Global 滞后<input id="data-global-lag" type="number" value="1" /></label>
               <label>Z 窗口<input id="data-z-window" type="number" value="36" /></label>
             </div>
+            <div id="data-ribbon" class="section-gap">
+              <div class="hint-box">处理后交集、当前研究窗口和下一步 handoff 会显示在这里。</div>
+            </div>
 
             <!-- KPI cards -->
             <div id="data-summary" class="summary-grid">
@@ -100,6 +123,10 @@
               <div class="hint-box">运行 data 后将在此显示按语义分组的多轴图表。</div>
             </div>
 
+            <div id="data-selection-panel" class="section-gap">
+              <div class="hint-box">运行 data 后可在这里选取交给第三部分的数据时间区间。</div>
+            </div>
+
             <!-- Handoff CTA -->
             <div id="data-handoff-bar" class="handoff-bar hidden">
               <div class="handoff-text">
@@ -110,11 +137,17 @@
             </div>
           </article>
 
-          <article class="panel">
+          <article class="panel sticky-panel">
             <div class="panel-head">
               <div><p class="eyebrow">Run Status</p><h2>处理结果</h2></div>
             </div>
             <div id="data-status" class="status-line"></div>
+            <div id="data-snapshot" class="summary-grid compact-grid">
+              <div class="hint-box">这里会显示处理后的关键摘要。</div>
+            </div>
+            <div id="data-selection-notes" class="section-gap">
+              <div class="hint-box">这里会显示当前编辑窗口、已应用窗口和预设快捷方式。</div>
+            </div>
             <div class="folder-actions">
               <button id="open-data-folder" class="secondary-button">在本地打开 Data 文件夹</button>
             </div>
@@ -170,6 +203,6 @@
       <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
       <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
     </main>
-    <script src="/static/app.js?v=20260323" type="module"></script>
+    <script src="/static/app.js?v=20260403" type="module"></script>
   </body>
 </html>

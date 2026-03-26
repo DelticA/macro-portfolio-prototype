@@ -14,6 +14,7 @@ from ..engine.artifacts import read_frame, read_json
 from ..engine.schemas import (
     BacktestRequest,
     DataRequest,
+    DataSelectionRequest,
     PolicyRequest,
     ProvidersRequest,
     RegimeRequest,
@@ -98,6 +99,11 @@ def load_providers(run_id: str, source_run_id: str):
 @app.post("/api/runs/{run_id}/data", response_model=StageResponse)
 def run_data(run_id: str, request: DataRequest):
     return _stage_response(run_id, "data", lambda: pipeline.run_data(run_id, request))
+
+
+@app.post("/api/runs/{run_id}/data/selection", response_model=StageResponse)
+def apply_data_selection(run_id: str, request: DataSelectionRequest):
+    return _stage_response(run_id, "data", lambda: pipeline.apply_data_selection(run_id, request))
 
 
 @app.post("/api/runs/{run_id}/regime", response_model=StageResponse)
