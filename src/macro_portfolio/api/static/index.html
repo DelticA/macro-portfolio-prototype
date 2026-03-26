@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macro Portfolio Lab 2.0</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260403" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260404" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
   <body>
@@ -165,7 +165,7 @@
         <div class="page-grid">
           <article class="panel">
             <div class="panel-head">
-              <div><p class="eyebrow">Page 3</p><h2>状态识别</h2></div>
+              <div><p class="eyebrow">Page 3 · Signal Lab</p><h2>状态识别</h2></div>
               <button id="run-regime">执行状态识别</button>
             </div>
             <div class="form-grid">
@@ -179,8 +179,14 @@
               <label>平滑窗口<input id="regime-smoothing" type="number" value="3" /></label>
               <label>状态数量<input id="regime-n-states" type="number" value="4" /></label>
             </div>
+            <div id="regime-ribbon" class="section-gap">
+              <div class="hint-box">这里会显示信号类型、拟合窗口和当前状态的摘要。</div>
+            </div>
             <div id="regime-summary" class="summary-grid">
               <div class="hint-box">先完成 data 阶段，再执行状态识别。</div>
+            </div>
+            <div id="regime-analysis" class="section-gap">
+              <div class="hint-box">这里会显示状态路径、置信度和最近观测。</div>
             </div>
             <div id="regime-handoff-bar" class="handoff-bar hidden">
               <div class="handoff-text">
@@ -190,19 +196,122 @@
               <button id="goto-policy" class="handoff-btn">进入策略决策 →</button>
             </div>
           </article>
-          <article class="panel">
+          <article class="panel sticky-panel">
             <div class="panel-head">
-              <div><p class="eyebrow">Run Status</p><h2>识别结果</h2></div>
+              <div><p class="eyebrow">Run Status</p><h2>信号说明</h2></div>
             </div>
             <div id="regime-status" class="status-line"></div>
+            <div id="regime-notes" class="section-gap">
+              <div class="hint-box">这里会显示当前信号层使用的输入、状态空间和下游接续说明。</div>
+            </div>
             <pre id="regime-log" class="stage-log"></pre>
           </article>
         </div>
       </section>
 
-      <section id="policy-page" class="page"><article class="panel placeholder-panel"><h2>策略决策</h2><p>下一步单独打磨。</p></article></section>
-      <section id="backtest-page" class="page"><article class="panel placeholder-panel"><h2>回测分析</h2><p>下一步单独打磨。</p></article></section>
+      <section id="policy-page" class="page">
+        <div class="page-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Page 4 · Strategy Composer</p><h2>策略决策</h2></div>
+              <button id="run-policy">生成目标组合</button>
+            </div>
+            <div class="form-grid">
+              <label>组合构建
+                <select id="policy-portfolio-model">
+                  <option value="cvar">cvar（约束优化）</option>
+                  <option value="risk_parity">risk_parity（均衡风险）</option>
+                  <option value="template_rule">template_rule（模板规则）</option>
+                </select>
+              </label>
+              <label>风险层
+                <select id="policy-risk-model">
+                  <option value="confidence_guard">confidence_guard（低置信度收缩）</option>
+                  <option value="vol_target">vol_target（波动率目标）</option>
+                  <option value="none">none（不叠加）</option>
+                </select>
+              </label>
+              <label>训练窗口<input id="policy-training-window" type="number" value="60" /></label>
+              <label>参考成本 (bps)<input id="policy-transaction-cost" type="number" value="5" /></label>
+            </div>
+            <div id="policy-ribbon" class="section-gap">
+              <div class="hint-box">这里会显示组合构建模型、风险叠加层和当前交易资产池摘要。</div>
+            </div>
+            <div id="policy-summary" class="summary-grid">
+              <div class="hint-box">先完成状态识别，再执行策略决策。</div>
+            </div>
+            <div id="policy-workbench" class="section-gap">
+              <div class="hint-box">这里会显示原始组合、风控后组合和目标权重簿。</div>
+            </div>
+            <div id="policy-handoff-bar" class="handoff-bar hidden">
+              <div class="handoff-text">
+                <strong>组合构建完成</strong>
+                <span>可进入下一阶段：回测分析</span>
+              </div>
+              <button id="goto-backtest" class="handoff-btn">进入回测分析 →</button>
+            </div>
+          </article>
+          <article class="panel sticky-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Run Status</p><h2>策略说明</h2></div>
+            </div>
+            <div id="policy-status" class="status-line"></div>
+            <div id="policy-notes" class="section-gap">
+              <div class="hint-box">这里会显示组合构建说明、风控参数和当前限制。</div>
+            </div>
+            <pre id="policy-log" class="stage-log"></pre>
+          </article>
+        </div>
+      </section>
+
+      <section id="backtest-page" class="page">
+        <div class="page-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Page 5 · Backtest Studio</p><h2>回测分析</h2></div>
+              <button id="run-backtest">执行回测</button>
+            </div>
+            <div class="form-grid">
+              <label>组合构建
+                <select id="backtest-portfolio-model">
+                  <option value="cvar">cvar（约束优化）</option>
+                  <option value="risk_parity">risk_parity（均衡风险）</option>
+                  <option value="template_rule">template_rule（模板规则）</option>
+                </select>
+              </label>
+              <label>风险层
+                <select id="backtest-risk-model">
+                  <option value="confidence_guard">confidence_guard（低置信度收缩）</option>
+                  <option value="vol_target">vol_target（波动率目标）</option>
+                  <option value="none">none（不叠加）</option>
+                </select>
+              </label>
+              <label>训练窗口<input id="backtest-training-window" type="number" value="60" /></label>
+              <label>交易成本 (bps)<input id="backtest-transaction-cost" type="number" value="5" /></label>
+            </div>
+            <div id="backtest-ribbon" class="section-gap">
+              <div class="hint-box">这里会显示策略栈、样本长度和回测结果摘要。</div>
+            </div>
+            <div id="backtest-summary" class="summary-grid">
+              <div class="hint-box">先完成第 3、4 页，再执行回测分析。</div>
+            </div>
+            <div id="backtest-workbench" class="section-gap">
+              <div class="hint-box">这里会显示 NAV 与基准对比、最近一期持仓和关键结果。</div>
+            </div>
+          </article>
+          <article class="panel sticky-panel">
+            <div class="panel-head">
+              <div><p class="eyebrow">Run Status</p><h2>回测说明</h2></div>
+            </div>
+            <div id="backtest-status" class="status-line"></div>
+            <div id="backtest-notes" class="section-gap">
+              <div class="hint-box">这里会显示回测假设、策略配置和当前结果提示。</div>
+            </div>
+            <pre id="backtest-log" class="stage-log"></pre>
+          </article>
+        </div>
+      </section>
     </main>
-    <script src="/static/app.js?v=20260403" type="module"></script>
+    <script src="/static/app.js?v=20260404" type="module"></script>
   </body>
 </html>

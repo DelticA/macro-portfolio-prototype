@@ -30,6 +30,12 @@ const dataState = {
   appliedSelection: null,
 };
 
+const researchState = {
+  regimeChart: null,
+  policyChart: null,
+  backtestChart: null,
+};
+
 const CUSTOM_MARKETS = {
   CN: {
     label: "A 股",
@@ -133,6 +139,12 @@ const api = {
   async runRegime(runId, payload) {
     return handle(await fetch(`/api/runs/${runId}/regime`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }));
   },
+  async runPolicy(runId, payload) {
+    return handle(await fetch(`/api/runs/${runId}/policy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }));
+  },
+  async runBacktest(runId, payload) {
+    return handle(await fetch(`/api/runs/${runId}/backtest`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }));
+  },
   async getArtifact(runId, stage, name) { return handle(await fetch(`/api/runs/${runId}/artifacts/${stage}/${name}`)); },
   async loadProvidersFromRun(runId, sourceRunId) {
     return handle(await fetch(`/api/runs/${runId}/providers/load?source_run_id=${encodeURIComponent(sourceRunId)}`, { method: "POST" }));
@@ -154,11 +166,12 @@ async function init() {
 
 function bindTabs() {
   document.querySelectorAll(".tab-button").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       document.querySelectorAll(".tab-button").forEach((n) => n.classList.remove("active"));
       document.querySelectorAll(".page").forEach((n) => n.classList.remove("active"));
       button.classList.add("active");
       document.getElementById(button.dataset.tab).classList.add("active");
+      await refreshActivePage(button.dataset.tab);
     });
   });
 }
@@ -170,6 +183,17 @@ function activateTab(tabId) {
   if (btn) btn.classList.add("active");
   const page = document.getElementById(tabId);
   if (page) page.classList.add("active");
+  refreshActivePage(tabId);
+}
+
+async function refreshActivePage(tabId) {
+  const runId = currentRunId();
+  if (!runId) return;
+  if (tabId === "providers-page") await renderProviders(runId);
+  else if (tabId === "data-page") await renderData(runId);
+  else if (tabId === "regime-page") await renderRegime(runId);
+  else if (tabId === "policy-page") await renderPolicy(runId);
+  else if (tabId === "backtest-page") await renderBacktest(runId);
 }
 
 function bindActions() {
@@ -184,7 +208,7 @@ function bindActions() {
   });
   document.getElementById("run-select").addEventListener("change", async () => {
     const runId = currentRunId();
-    if (runId) { await renderProviders(runId); await renderData(runId); await renderRegime(runId); }
+    if (runId) { await renderProviders(runId); await renderData(runId); await renderRegime(runId); await renderPolicy(runId); await renderBacktest(runId); }
   });
   document.getElementById("run-providers").addEventListener("click", async () => { await runProvidersWithItems(null); });
   document.getElementById("load-providers-from-run").addEventListener("click", async () => {
@@ -203,6 +227,9 @@ function bindActions() {
   document.getElementById("goto-regime").addEventListener("click", () => { activateTab("regime-page"); });
   document.getElementById("run-regime").addEventListener("click", async () => { await runRegimeStage(); });
   document.getElementById("goto-policy")?.addEventListener("click", () => { activateTab("policy-page"); });
+  document.getElementById("run-policy")?.addEventListener("click", async () => { await runPolicyStage(); });
+  document.getElementById("goto-backtest")?.addEventListener("click", () => { activateTab("backtest-page"); });
+  document.getElementById("run-backtest")?.addEventListener("click", async () => { await runBacktestStage(); });
   document.addEventListener("click", (event) => {
     if (event.target?.dataset?.addCustomMarket) addCustomEquity(event.target.dataset.addCustomMarket);
     if (event.target?.id === "apply-data-selection") applyDataSelection();
@@ -250,7 +277,7 @@ async function refreshRuns(selectedId = null) {
     const fallback = data.items.find((item) => item.run_id !== select.value);
     if (fallback) copySelect.value = fallback.run_id;
   }
-  if (select.value) { await renderProviders(select.value); await renderData(select.value); await renderRegime(select.value); }
+  if (select.value) { await renderProviders(select.value); await renderData(select.value); await renderRegime(select.value); await renderPolicy(select.value); await renderBacktest(select.value); }
 }
 
 function currentRunId() { return document.getElementById("run-select").value; }
@@ -1895,10 +1922,56 @@ async function renderRegime(runId) {
   const payload = await api.getStage(runId, "regime");
   setRegimeStatus(buildStageStatus(payload, "regime"));
   document.getElementById("regime-log").textContent = payload.log || "";
+  renderRegimeRibbon(payload.summary || {});
   renderRegimeSummary(payload.summary || {});
+  renderRegimeNotes(payload.summary || {});
   if (payload.status === "success") {
+    const artifact = await safeGetArtifact(runId, "regime", "regime");
+    renderRegimeWorkbench(payload.summary || {}, artifact?.rows || payload.preview?.regime || []);
     document.getElementById("regime-handoff-bar")?.classList.remove("hidden");
+    return;
   }
+  destroyResearchChart("regimeChart");
+  renderRegimeWorkbench(payload.summary || {}, []);
+  document.getElementById("regime-handoff-bar")?.classList.add("hidden");
+}
+
+function renderRegimeRibbon(summary) {
+  const container = document.getElementById("regime-ribbon");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示信号类型、拟合窗口和当前状态的摘要。</div>`;
+    return;
+  }
+  const cards = [
+    {
+      label: "Signal Kind",
+      value: summary.signal_kind === "state" ? "State Signal" : (summary.signal_kind || "-"),
+      meta: `当前模型 ${summary.model_name || "-"}`,
+    },
+    {
+      label: "Fit Window",
+      value: `${shortDate(summary.fit_window?.start)} → ${shortDate(summary.fit_window?.end)}`,
+      meta: `${summary.input_rows ?? "-"} 期输入`,
+    },
+    {
+      label: "Latest State",
+      value: summary.latest_regime || "-",
+      meta: `置信度 ${formatPct(summary.latest_confidence)}`,
+    },
+    {
+      label: "Feature Set",
+      value: `${summary.input_feature_count ?? 0} 列`,
+      meta: summary.selection?.feature_columns?.length ? `继承第 2 页筛选 ${summary.selection.feature_columns.length} 列` : "未单独筛选时使用全部处理后特征",
+    },
+  ];
+  container.innerHTML = `<div class="ribbon-grid">${cards.map((card) => `
+    <div class="ribbon-card">
+      <span class="ribbon-label">${card.label}</span>
+      <span class="ribbon-value">${card.value}</span>
+      <div class="ribbon-meta">${card.meta}</div>
+    </div>
+  `).join("")}</div>`;
 }
 
 function renderRegimeSummary(summary) {
@@ -1933,9 +2006,574 @@ function renderRegimeSummary(summary) {
       <div class="metric-label">模型</div>
       <div class="metric-value">${summary.model_name ?? "-"}</div>
     </div>
+    <div class="metric-card">
+      <div class="metric-label">输入特征</div>
+      <div class="metric-value">${summary.input_feature_count ?? "-"} 列 · ${summary.input_rows ?? "-"} 期</div>
+    </div>
     ${selectionCard}
     ${countCards}
   `;
+}
+
+function renderRegimeNotes(summary) {
+  const container = document.getElementById("regime-notes");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示当前信号层使用的输入、状态空间和下游接续说明。</div>`;
+    return;
+  }
+  const featurePreview = (summary.feature_columns || []).slice(0, 8).join(", ");
+  container.innerHTML = `
+    <div class="spotlight-section">
+      <div class="group-head"><div><p class="eyebrow">Signal Lab</p><h3>研究说明</h3></div></div>
+      <div class="spotlight-list">
+        <div class="spotlight-row">
+          <div>
+            <strong>输入窗口</strong>
+            <p>${shortDate(summary.fit_window?.start)} → ${shortDate(summary.fit_window?.end)}</p>
+          </div>
+          <div class="spotlight-meta"><span>${summary.input_rows ?? "-"} 期</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>状态空间</strong>
+            <p>${(summary.state_labels || []).join(" · ") || "待生成"}</p>
+          </div>
+          <div class="spotlight-meta"><span>${Object.keys(summary.counts || {}).length} 个状态</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>特征快照</strong>
+            <p>${featurePreview || "待生成"}</p>
+          </div>
+          <div class="spotlight-meta"><span>${summary.input_feature_count ?? 0} 列</span></div>
+        </div>
+      </div>
+      <div class="workspace-note" style="margin-top:12px"><strong>下游说明</strong><br />第 4 页当前会读取这里最新一期的状态信号，并在组合构建后叠加风险层。</div>
+    </div>
+  `;
+}
+
+function renderRegimeWorkbench(summary, rows) {
+  const container = document.getElementById("regime-analysis");
+  if (!container) return;
+  if (!rows.length) {
+    container.innerHTML = `<div class="hint-box">先完成 data 阶段，再执行状态识别。</div>`;
+    return;
+  }
+  const recentRows = rows.slice(-8).reverse();
+  container.innerHTML = `
+    <div class="analysis-grid">
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Signal Timeline</p><h3>状态路径与置信度</h3></div>
+          <span class="mono-chip">最新状态 ${summary.latest_regime || "-"}</span>
+        </div>
+        <div class="analysis-chart-wrap"><canvas id="regime-chart"></canvas></div>
+      </section>
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Recent States</p><h3>最近观测</h3></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>日期</th><th>状态</th><th>置信度</th><th>State ID</th></tr></thead>
+            <tbody>
+              ${recentRows.map((row) => `
+                <tr>
+                  <td>${shortDate(row.date)}</td>
+                  <td>${row.portfolio_regime || row.state_label || "-"}</td>
+                  <td>${formatPct(row.regime_confidence)}</td>
+                  <td>${row.state_id ?? "-"}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+  destroyResearchChart("regimeChart");
+  const canvas = document.getElementById("regime-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+  const plotRows = rows.slice(-60);
+  researchState.regimeChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: plotRows.map((row) => shortDate(row.date)),
+      datasets: [
+        {
+          label: "Regime Confidence",
+          data: plotRows.map((row) => Number(row.regime_confidence || 0)),
+          borderColor: "#145a41",
+          backgroundColor: "rgba(20, 90, 65, 0.14)",
+          tension: 0.22,
+          pointRadius: 0,
+          fill: true,
+          yAxisID: "y",
+        },
+        {
+          label: "State ID",
+          data: plotRows.map((row) => Number(row.state_id || 0)),
+          borderColor: "rgba(164, 112, 26, 0.92)",
+          borderDash: [6, 4],
+          tension: 0,
+          pointRadius: 0,
+          yAxisID: "y1",
+        },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom" } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { min: 0, max: 1, ticks: { callback: (value) => `${Math.round(value * 100)}%` } },
+        y1: { position: "right", grid: { drawOnChartArea: false }, ticks: { precision: 0 } },
+      },
+    },
+  });
+}
+
+// ============================================================
+// POLICY STAGE
+// ============================================================
+async function runPolicyStage() {
+  const runId = currentRunId();
+  if (!runId) { setPolicyStatus("请先创建或选择一个实验 run。"); return; }
+  setPolicyStatus("运行中: strategy composer");
+  try {
+    await api.runPolicy(runId, collectPolicyPayload());
+    await renderPolicy(runId);
+  } catch (error) {
+    setPolicyStatus(`失败: ${error.message}`);
+    document.getElementById("policy-log").textContent = String(error.message || error);
+  }
+}
+
+function collectPolicyPayload() {
+  const portfolioModel = document.getElementById("policy-portfolio-model")?.value || "cvar";
+  return {
+    model_name: portfolioModel,
+    portfolio_model: portfolioModel,
+    risk_model: document.getElementById("policy-risk-model")?.value || "confidence_guard",
+    execution_model: "immediate",
+    training_window: Number(document.getElementById("policy-training-window")?.value || 60),
+    transaction_cost_bps: Number(document.getElementById("policy-transaction-cost")?.value || 5),
+    overrides: {},
+  };
+}
+
+async function renderPolicy(runId) {
+  const payload = await api.getStage(runId, "policy");
+  setPolicyStatus(buildStageStatus(payload, "policy"));
+  document.getElementById("policy-log").textContent = payload.log || "";
+  renderPolicyRibbon(payload.summary || {});
+  renderPolicySummary(payload.summary || {});
+  renderPolicyNotes(payload.summary || {});
+  if (payload.status === "success") {
+    const artifact = await safeGetArtifact(runId, "policy", "weights_target");
+    renderPolicyWorkbench(payload.summary || {}, artifact?.rows || payload.preview?.weights_target || []);
+    document.getElementById("policy-handoff-bar")?.classList.remove("hidden");
+    return;
+  }
+  destroyResearchChart("policyChart");
+  renderPolicyWorkbench(payload.summary || {}, []);
+  document.getElementById("policy-handoff-bar")?.classList.add("hidden");
+}
+
+function renderPolicyRibbon(summary) {
+  const container = document.getElementById("policy-ribbon");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示组合构建模型、风险叠加层和当前交易资产池摘要。</div>`;
+    return;
+  }
+  const cards = [
+    {
+      label: "Strategy Stack",
+      value: `${summary.portfolio_model || "-"} + ${summary.risk_model || "-"}`,
+      meta: `执行模型 ${summary.execution_model || "immediate"}`,
+    },
+    {
+      label: "Signal Input",
+      value: summary.latest_regime || "-",
+      meta: `置信度 ${formatPct(summary.latest_confidence)}`,
+    },
+    {
+      label: "Risk Shift",
+      value: formatPct(summary.risk_shift),
+      meta: "风险层从原始组合挪动的资本比例",
+    },
+    {
+      label: "Tradable Universe",
+      value: `${(summary.tradable_universe || []).length} 个核心资产`,
+      meta: (summary.tradable_universe || []).join(" · "),
+    },
+  ];
+  container.innerHTML = `<div class="ribbon-grid">${cards.map((card) => `
+    <div class="ribbon-card">
+      <span class="ribbon-label">${card.label}</span>
+      <span class="ribbon-value">${card.value}</span>
+      <div class="ribbon-meta">${card.meta}</div>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderPolicySummary(summary) {
+  const container = document.getElementById("policy-summary");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">先完成状态识别，再执行策略决策。</div>`;
+    return;
+  }
+  const topWeight = summary.top_weights?.[0];
+  container.innerHTML = `
+    <div class="metric-card">
+      <div class="metric-label">组合模型</div>
+      <div class="metric-value">${summary.portfolio_model || "-"}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">风险层</div>
+      <div class="metric-value">${summary.risk_model || "-"}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">训练窗口</div>
+      <div class="metric-value">${summary.training_window ?? "-"} 期</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">当前信号</div>
+      <div class="metric-value">${summary.latest_regime || "-"}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">最高权重</div>
+      <div class="metric-value">${topWeight ? `${topWeight.asset} · ${formatPct(topWeight.target_weight)}` : "-"}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">已应用窗口</div>
+      <div class="metric-value">${summary.selection?.start ? `${shortDate(summary.selection.start)} → ${shortDate(summary.selection.end)}` : "全量处理后窗口"}</div>
+    </div>
+  `;
+}
+
+function renderPolicyNotes(summary) {
+  const container = document.getElementById("policy-notes");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示组合构建说明、风控参数和当前限制。</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <div class="spotlight-section">
+      <div class="group-head"><div><p class="eyebrow">Strategy Composer</p><h3>组合说明</h3></div></div>
+      <div class="spotlight-list">
+        <div class="spotlight-row">
+          <div>
+            <strong>组合构建</strong>
+            <p>${summary.portfolio_model || "-"} · 读取第 3 页最新状态信号</p>
+          </div>
+          <div class="spotlight-meta"><span>${summary.training_window ?? "-"} 期</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>风险叠加</strong>
+            <p>${summary.risk_model || "-"} · 资本平移 ${formatPct(summary.risk_shift)}</p>
+          </div>
+          <div class="spotlight-meta"><span>${summary.execution_model || "immediate"}</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>当前限制</strong>
+            <p>交易资产池当前仍固定为核心九类资产，自定义股票暂未进入可交易层。</p>
+          </div>
+          <div class="spotlight-meta"><span>${(summary.tradable_universe || []).length || 0} 个</span></div>
+        </div>
+      </div>
+      <div class="workspace-note" style="margin-top:12px"><strong>后续扩展位</strong><br />这一层已经按组合构建和风险层拆开，后面新增定制策略时可以直接替换其中任一模块。</div>
+    </div>
+  `;
+}
+
+function renderPolicyWorkbench(summary, rows) {
+  const container = document.getElementById("policy-workbench");
+  if (!container) return;
+  if (!rows.length) {
+    container.innerHTML = `<div class="hint-box">先完成状态识别，再执行策略决策。</div>`;
+    return;
+  }
+  const sortedRows = [...rows].sort((a, b) => Number(b.target_weight || 0) - Number(a.target_weight || 0));
+  container.innerHTML = `
+    <div class="analysis-grid">
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Weight Stack</p><h3>原始组合与风险后组合</h3></div>
+          <span class="mono-chip">Risk Shift ${formatPct(summary.risk_shift)}</span>
+        </div>
+        <div class="analysis-chart-wrap"><canvas id="policy-chart"></canvas></div>
+      </section>
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Weight Book</p><h3>目标权重簿</h3></div>
+        </div>
+        <div class="weight-book">
+          ${sortedRows.map((row) => weightBookRow(row)).join("")}
+        </div>
+      </section>
+    </div>
+  `;
+  destroyResearchChart("policyChart");
+  const canvas = document.getElementById("policy-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+  researchState.policyChart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: sortedRows.map((row) => row.asset),
+      datasets: [
+        {
+          label: "Raw",
+          data: sortedRows.map((row) => Number(row.raw_weight || 0)),
+          backgroundColor: "rgba(24, 33, 28, 0.18)",
+          borderRadius: 8,
+        },
+        {
+          label: "Target",
+          data: sortedRows.map((row) => Number(row.target_weight || 0)),
+          backgroundColor: "rgba(20, 90, 65, 0.78)",
+          borderRadius: 8,
+        },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom" } },
+      scales: {
+        x: { stacked: false, grid: { display: false } },
+        y: { ticks: { callback: (value) => `${Math.round(value * 100)}%` } },
+      },
+    },
+  });
+}
+
+// ============================================================
+// BACKTEST STAGE
+// ============================================================
+async function runBacktestStage() {
+  const runId = currentRunId();
+  if (!runId) { setBacktestStatus("请先创建或选择一个实验 run。"); return; }
+  setBacktestStatus("运行中: backtest");
+  try {
+    await api.runBacktest(runId, collectBacktestPayload());
+    await renderBacktest(runId);
+  } catch (error) {
+    setBacktestStatus(`失败: ${error.message}`);
+    document.getElementById("backtest-log").textContent = String(error.message || error);
+  }
+}
+
+function collectBacktestPayload() {
+  const portfolioModel = document.getElementById("backtest-portfolio-model")?.value || "cvar";
+  return {
+    model_name: portfolioModel,
+    portfolio_model: portfolioModel,
+    risk_model: document.getElementById("backtest-risk-model")?.value || "confidence_guard",
+    execution_model: "immediate",
+    training_window: Number(document.getElementById("backtest-training-window")?.value || 60),
+    transaction_cost_bps: Number(document.getElementById("backtest-transaction-cost")?.value || 5),
+    overrides: {},
+  };
+}
+
+async function renderBacktest(runId) {
+  const payload = await api.getStage(runId, "backtest");
+  setBacktestStatus(buildStageStatus(payload, "backtest"));
+  document.getElementById("backtest-log").textContent = payload.log || "";
+  renderBacktestRibbon(payload.summary || {});
+  renderBacktestSummary(payload.summary || {});
+  renderBacktestNotes(payload.summary || {});
+  if (payload.status === "success") {
+    const [navArtifact, benchmarkArtifact] = await Promise.all([
+      safeGetArtifact(runId, "backtest", "nav"),
+      safeGetArtifact(runId, "backtest", "benchmarks"),
+    ]);
+    renderBacktestWorkbench(payload.summary || {}, navArtifact?.rows || [], benchmarkArtifact?.rows || []);
+    return;
+  }
+  destroyResearchChart("backtestChart");
+  renderBacktestWorkbench(payload.summary || {}, [], []);
+}
+
+function renderBacktestRibbon(summary) {
+  const container = document.getElementById("backtest-ribbon");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示策略栈、样本长度和回测结果摘要。</div>`;
+    return;
+  }
+  const cards = [
+    {
+      label: "Strategy Stack",
+      value: `${summary.portfolio_model || "-"} + ${summary.risk_model || "-"}`,
+      meta: `执行模型 ${summary.execution_model || "immediate"}`,
+    },
+    {
+      label: "Sample Length",
+      value: `${summary.nav_rows ?? 0} 期`,
+      meta: summary.selection?.start ? `${shortDate(summary.selection.start)} → ${shortDate(summary.selection.end)}` : "全量处理后窗口",
+    },
+    {
+      label: "Latest NAV",
+      value: summary.latest_nav != null ? summary.latest_nav.toFixed(2) : "-",
+      meta: `CAGR ${formatPct(summary.metrics?.cagr)}`,
+    },
+    {
+      label: "Tradable Universe",
+      value: `${(summary.tradable_universe || []).length} 个资产`,
+      meta: (summary.tradable_universe || []).join(" · "),
+    },
+  ];
+  container.innerHTML = `<div class="ribbon-grid">${cards.map((card) => `
+    <div class="ribbon-card">
+      <span class="ribbon-label">${card.label}</span>
+      <span class="ribbon-value">${card.value}</span>
+      <div class="ribbon-meta">${card.meta}</div>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderBacktestSummary(summary) {
+  const container = document.getElementById("backtest-summary");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">先完成第 3、4 页，再执行回测分析。</div>`;
+    return;
+  }
+  const metrics = summary.metrics || {};
+  const cards = [
+    ["CAGR", formatPct(metrics.cagr)],
+    ["Annualized Vol", formatPct(metrics.annualized_vol)],
+    ["Sharpe", formatRatio(metrics.sharpe)],
+    ["Sortino", formatRatio(metrics.sortino)],
+    ["Max Drawdown", formatPct(metrics.max_drawdown)],
+    ["CVaR 95", formatPct(metrics.cvar_95)],
+  ];
+  container.innerHTML = cards.map(([label, value]) => `
+    <div class="metric-card">
+      <div class="metric-label">${label}</div>
+      <div class="metric-value">${value}</div>
+    </div>
+  `).join("");
+}
+
+function renderBacktestNotes(summary) {
+  const container = document.getElementById("backtest-notes");
+  if (!container) return;
+  if (!summary || !Object.keys(summary).length || summary.error) {
+    container.innerHTML = `<div class="hint-box">这里会显示回测假设、策略配置和当前结果提示。</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <div class="spotlight-section">
+      <div class="group-head"><div><p class="eyebrow">Backtest Studio</p><h3>结果说明</h3></div></div>
+      <div class="spotlight-list">
+        <div class="spotlight-row">
+          <div>
+            <strong>策略栈</strong>
+            <p>${summary.portfolio_model || "-"} + ${summary.risk_model || "-"} + ${summary.execution_model || "immediate"}</p>
+          </div>
+          <div class="spotlight-meta"><span>${summary.nav_rows ?? 0} 期</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>当前收益画像</strong>
+            <p>CAGR ${formatPct(summary.metrics?.cagr)} · Vol ${formatPct(summary.metrics?.annualized_vol)} · MaxDD ${formatPct(summary.metrics?.max_drawdown)}</p>
+          </div>
+          <div class="spotlight-meta"><span>Sharpe ${formatRatio(summary.metrics?.sharpe)}</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>假设说明</strong>
+            <p>当前执行层仍为 immediate，尚未加入更细的撮合和滑点模型。</p>
+          </div>
+          <div class="spotlight-meta"><span>初版</span></div>
+        </div>
+      </div>
+      <div class="workspace-note" style="margin-top:12px"><strong>下一步扩展位</strong><br />后续接入定制化策略时，可以保持回测层不动，只替换第 4 页的组合构建或风险模块。</div>
+    </div>
+  `;
+}
+
+function renderBacktestWorkbench(summary, navRows, benchmarkRows) {
+  const container = document.getElementById("backtest-workbench");
+  if (!container) return;
+  if (!navRows.length) {
+    container.innerHTML = `<div class="hint-box">先完成第 3、4 页，再执行回测分析。</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <div class="analysis-grid">
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Performance Curve</p><h3>NAV 与基准对比</h3></div>
+          <span class="mono-chip">NAV ${summary.latest_nav != null ? summary.latest_nav.toFixed(2) : "-"}</span>
+        </div>
+        <div class="analysis-chart-wrap"><canvas id="backtest-chart"></canvas></div>
+      </section>
+      <section class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Latest Weights</p><h3>最近一期持仓</h3></div>
+        </div>
+        <div class="weight-book">
+          ${(summary.latest_weights || []).map((row) => weightBookRow({ ...row, raw_weight: row.target_weight, risk_delta: 0 })).join("") || `<div class="hint-box">暂无最近一期持仓。</div>`}
+        </div>
+      </section>
+    </div>
+  `;
+  destroyResearchChart("backtestChart");
+  const canvas = document.getElementById("backtest-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+  const benchmarkColumns = benchmarkRows.length ? Object.keys(benchmarkRows[0]).filter((key) => key !== "date") : [];
+  researchState.backtestChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: navRows.map((row) => shortDate(row.date)),
+      datasets: [
+        {
+          label: "Strategy NAV",
+          data: navRows.map((row) => Number(row.nav || 0)),
+          borderColor: "#145a41",
+          backgroundColor: "rgba(20, 90, 65, 0.12)",
+          pointRadius: 0,
+          tension: 0.18,
+          fill: false,
+          borderWidth: 2.5,
+        },
+        ...benchmarkColumns.slice(0, 3).map((column, index) => ({
+          label: column,
+          data: benchmarkRows.map((row) => Number(row[column] || 0)).reduce((acc, value) => {
+            const prev = acc.length ? acc[acc.length - 1] : 1;
+            acc.push(prev * (1 + value));
+            return acc;
+          }, []),
+          borderColor: ["#a26d1f", "#587aa5", "#8c5d12"][index] || "#7a7a7a",
+          borderDash: [6, 4],
+          pointRadius: 0,
+          tension: 0.18,
+          fill: false,
+        })),
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom" } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { ticks: { callback: (value) => Number(value).toFixed(2) } },
+      },
+    },
+  });
 }
 
 // ============================================================
@@ -1944,6 +2582,8 @@ function renderRegimeSummary(summary) {
 function setProvidersStatus(text) { document.getElementById("providers-status").textContent = text; }
 function setDataStatus(text) { document.getElementById("data-status").textContent = text; }
 function setRegimeStatus(text) { document.getElementById("regime-status").textContent = text; }
+function setPolicyStatus(text) { document.getElementById("policy-status").textContent = text; }
+function setBacktestStatus(text) { document.getElementById("backtest-status").textContent = text; }
 
 function buildStageStatus(payload, stageName) {
   if (payload.status !== "success") {
@@ -1951,6 +2591,60 @@ function buildStageStatus(payload, stageName) {
     return `状态: ${payload.status}${error}`;
   }
   return `状态: success · ${stageName}`;
+}
+
+async function safeGetArtifact(runId, stage, name) {
+  try {
+    return await api.getArtifact(runId, stage, name);
+  } catch (_) {
+    return null;
+  }
+}
+
+function destroyResearchChart(key) {
+  if (researchState[key]) {
+    researchState[key].destroy();
+    researchState[key] = null;
+  }
+}
+
+function formatPct(value, digits = 1) {
+  if (value == null || !Number.isFinite(Number(value))) return "-";
+  return `${(Number(value) * 100).toFixed(digits)}%`;
+}
+
+function formatRatio(value, digits = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return "-";
+  return Number(value).toFixed(digits);
+}
+
+function weightBarWidth(weight) {
+  const numeric = Math.abs(Number(weight || 0));
+  return Math.max(2, Math.min(numeric * 280, 100));
+}
+
+function weightBookRow(row) {
+  const delta = Number(row.risk_delta || 0);
+  const deltaLabel = `${delta >= 0 ? "+" : ""}${formatPct(delta)}`;
+  return `
+    <div class="weight-row">
+      <div class="weight-row-head">
+        <div>
+          <strong>${row.asset || "-"}</strong>
+          <span>${row.sleeve || "portfolio"}${row.region ? ` · ${row.region}` : ""}</span>
+        </div>
+        <div class="weight-row-metrics">
+          <span>Raw ${formatPct(row.raw_weight)}</span>
+          <span>Target ${formatPct(row.target_weight)}</span>
+          <span class="delta-chip ${delta >= 0 ? "is-up" : "is-down"}">${deltaLabel}</span>
+        </div>
+      </div>
+      <div class="weight-bars">
+        <div class="weight-bar-track"><span class="weight-bar raw" style="width:${weightBarWidth(row.raw_weight)}%"></span></div>
+        <div class="weight-bar-track"><span class="weight-bar target" style="width:${weightBarWidth(row.target_weight)}%"></span></div>
+      </div>
+    </div>
+  `;
 }
 
 function translateStatus(status) {

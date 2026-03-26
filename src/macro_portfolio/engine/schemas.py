@@ -61,6 +61,9 @@ class RegimeRequest(BaseModel):
 
 class PolicyRequest(BaseModel):
     model_name: Literal["template_rule", "risk_parity", "cvar"] = "cvar"
+    portfolio_model: Literal["template_rule", "risk_parity", "cvar"] | None = None
+    risk_model: Literal["none", "confidence_guard", "vol_target"] = "confidence_guard"
+    execution_model: Literal["immediate"] = "immediate"
     training_window: int = 60
     transaction_cost_bps: float = 5.0
     overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
@@ -68,6 +71,9 @@ class PolicyRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     model_name: Literal["template_rule", "risk_parity", "cvar"] = "cvar"
+    portfolio_model: Literal["template_rule", "risk_parity", "cvar"] | None = None
+    risk_model: Literal["none", "confidence_guard", "vol_target"] = "confidence_guard"
+    execution_model: Literal["immediate"] = "immediate"
     training_window: int = 60
     transaction_cost_bps: float = 5.0
     overrides: dict[str, dict[str, float]] = Field(default_factory=dict)

@@ -1011,10 +1011,112 @@ pre.stage-log {
   white-space: pre-wrap;
 }
 
+.analysis-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+  gap: 14px;
+}
+
+.analysis-chart-wrap {
+  position: relative;
+  min-height: 340px;
+}
+
+.analysis-chart-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.weight-book {
+  display: grid;
+  gap: 12px;
+}
+
+.weight-row {
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(243, 239, 231, 0.58);
+  border: 1px solid rgba(20, 33, 28, 0.08);
+}
+
+.weight-row-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.weight-row-head strong {
+  display: block;
+  color: var(--text);
+}
+
+.weight-row-head span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.weight-row-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.delta-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.delta-chip.is-up {
+  background: rgba(20, 90, 65, 0.12);
+  color: var(--brand);
+}
+
+.delta-chip.is-down {
+  background: rgba(181, 74, 63, 0.12);
+  color: var(--danger);
+}
+
+.weight-bars {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.weight-bar-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(20, 33, 28, 0.08);
+  overflow: hidden;
+}
+
+.weight-bar {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.weight-bar.raw {
+  background: rgba(24, 33, 28, 0.28);
+}
+
+.weight-bar.target {
+  background: linear-gradient(90deg, rgba(20, 90, 65, 0.58), rgba(20, 90, 65, 0.92));
+}
+
 @media (max-width: 1200px) {
   .page-grid { grid-template-columns: 1fr; }
   .tab-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sticky-panel { position: static; }
+  .analysis-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {
@@ -1024,6 +1126,8 @@ pre.stage-log {
   .segmented-control { grid-auto-flow: row; border-radius: 18px; }
   .segment-button { width: 100%; }
   .selection-universe-head, .selection-action-row, .selection-universe-stats { display: grid; }
+  .weight-row-head { grid-template-columns: 1fr; }
+  .weight-row-metrics { justify-content: start; }
 }
 
 /* ============================================================

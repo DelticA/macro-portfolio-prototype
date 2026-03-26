@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import math
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -26,7 +26,7 @@ from ..providers import (
     StooqClient,
     YahooFinanceClient,
 )
-from .registry import build_policy_model, build_regime_model
+from .registry import build_portfolio_model, build_regime_model, build_risk_model
 
 
 class PipelineService:
@@ -214,14 +214,26 @@ class PipelineService:
             diagnostics = model.diagnostics().details
             diagnostics["available_models"] = ["rule_based", "kmeans", "gmm"]
             diagnostics["counts"] = regime["portfolio_regime"].value_counts().to_dict()
+            diagnostics["input_feature_count"] = int(features.shape[1])
+            diagnostics["input_rows"] = int(len(features))
+            diagnostics["fit_window"] = {
+                "start": str(features.index.min()) if len(features.index) else None,
+                "end": str(features.index.max()) if len(features.index) else None,
+            }
             if selection:
                 diagnostics["selection"] = selection
             write_json(diagnostics, stage_dir / "diagnostics.json")
             summary = {
                 "model_name": request.model_name,
+                "signal_kind": "state",
                 "latest_regime": str(regime["portfolio_regime"].iloc[-1]),
                 "latest_confidence": float(regime["regime_confidence"].iloc[-1]),
                 "counts": diagnostics["counts"],
+                "state_labels": list(diagnostics["counts"].keys()),
+                "input_feature_count": diagnostics["input_feature_count"],
+                "input_rows": diagnostics["input_rows"],
+                "fit_window": diagnostics["fit_window"],
+                "feature_columns": list(features.columns[:12]),
             }
             if selection:
                 summary["selection"] = selection
@@ -234,7 +246,8 @@ class PipelineService:
     def run_policy(self, run_id: str, request: PolicyRequest) -> dict:
         stage = "policy"
         self.run_store.mark_stage(run_id, stage, "running")
-        self.run_store.log(run_id, stage, f"Allocating weights with {request.model_name}")
+        portfolio_model_name = self._portfolio_model_name(request)
+        self.run_store.log(run_id, stage, f"Allocating weights with portfolio={portfolio_model_name} risk={request.risk_model}")
 
         try:
             self._require_stage_success(run_id, "data")
@@ -242,27 +255,55 @@ class PipelineService:
             asset_returns, selection = self._load_data_artifact_with_selection(run_id, "asset_returns")
             regime = read_frame(self.run_store.stage_dir(run_id, "regime") / "regime.csv")
             config = self._policy_config(request.overrides)
-            model = build_policy_model(request.model_name, DEFAULT_ASSETS, config)
+            portfolio_model = build_portfolio_model(portfolio_model_name, DEFAULT_ASSETS, config)
+            risk_model = build_risk_model(request.risk_model, DEFAULT_ASSETS)
 
             aligned_dates = asset_returns.index.intersection(regime.index)
+            if aligned_dates.empty:
+                raise ValueError("No overlapping dates between asset returns and regime signal.")
             history = asset_returns.loc[aligned_dates].iloc[-request.training_window :]
             latest_signal = regime.loc[aligned_dates].iloc[-1]
-            weights = model.allocate(
+            raw_weights = portfolio_model.allocate(
                 history,
                 str(latest_signal["portfolio_regime"]),
                 float(latest_signal["regime_confidence"]),
                 None,
             )
-            frame = weights.rename("target_weight").reset_index().rename(columns={"index": "asset"})
-            frame["lower_bound"] = frame["asset"].map({asset.asset: asset.min_weight for asset in DEFAULT_ASSETS})
-            frame["upper_bound"] = frame["asset"].map({asset.asset: asset.max_weight for asset in DEFAULT_ASSETS})
+            weights = risk_model.apply(raw_weights, history, latest_signal, None).reindex(raw_weights.index).fillna(0.0)
+            if weights.sum() <= 0:
+                weights = raw_weights.copy()
+            weights = weights / weights.sum()
+            frame = _weights_frame(raw_weights, weights, DEFAULT_ASSETS)
+            raw_frame = frame[["asset", "raw_weight", "region", "sleeve", "lower_bound", "upper_bound"]].copy()
+            raw_frame = raw_frame.rename(columns={"raw_weight": "target_weight"})
 
             stage_dir = self.run_store.stage_dir(run_id, stage)
+            write_frame(raw_frame, stage_dir / "weights_target_raw.csv")
             write_frame(frame, stage_dir / "weights_target.csv")
+            manifest = self._strategy_manifest(
+                run_id=run_id,
+                portfolio_model=portfolio_model_name,
+                risk_model=request.risk_model,
+                execution_model=request.execution_model,
+                training_window=request.training_window,
+                transaction_cost_bps=request.transaction_cost_bps,
+                selection=selection,
+            )
+            write_json(manifest, stage_dir / "strategy_manifest.json")
             summary = {
-                "model_name": request.model_name,
+                "model_name": portfolio_model_name,
+                "portfolio_model": portfolio_model_name,
+                "risk_model": request.risk_model,
+                "execution_model": request.execution_model,
                 "latest_regime": str(latest_signal["portfolio_regime"]),
+                "latest_confidence": float(latest_signal["regime_confidence"]),
+                "training_window": int(len(history)),
+                "risk_shift": float(frame["risk_delta"].abs().sum() / 2.0),
+                "tradable_universe": [asset.asset for asset in DEFAULT_ASSETS],
                 "top_weights": frame.sort_values("target_weight", ascending=False).head(5).to_dict(orient="records"),
+                "raw_top_weights": frame.sort_values("raw_weight", ascending=False).head(5).to_dict(orient="records"),
+                "portfolio_diagnostics": portfolio_model.diagnostics().details,
+                "risk_diagnostics": risk_model.diagnostics().details,
             }
             if selection:
                 summary["selection"] = selection
@@ -275,7 +316,8 @@ class PipelineService:
     def run_backtest(self, run_id: str, request: BacktestRequest) -> dict:
         stage = "backtest"
         self.run_store.mark_stage(run_id, stage, "running")
-        self.run_store.log(run_id, stage, f"Running backtest with {request.model_name}")
+        portfolio_model_name = self._portfolio_model_name(request)
+        self.run_store.log(run_id, stage, f"Running backtest with portfolio={portfolio_model_name} risk={request.risk_model}")
 
         try:
             self._require_stage_success(run_id, "data")
@@ -283,10 +325,11 @@ class PipelineService:
             asset_returns, selection = self._load_data_artifact_with_selection(run_id, "asset_returns")
             regime = read_frame(self.run_store.stage_dir(run_id, "regime") / "regime.csv")
             policy_config = self._policy_config(request.overrides)
-            model = build_policy_model(request.model_name, DEFAULT_ASSETS, policy_config)
+            portfolio_model = build_portfolio_model(portfolio_model_name, DEFAULT_ASSETS, policy_config)
+            risk_model = build_risk_model(request.risk_model, DEFAULT_ASSETS)
 
             engine = BacktestEngine(
-                _BacktestPolicyAdapter(model),
+                _BacktestStrategyAdapter(portfolio_model, risk_model),
                 training_window=request.training_window,
                 transaction_cost_bps=request.transaction_cost_bps,
             )
@@ -298,10 +341,32 @@ class PipelineService:
             write_frame(result.benchmarks, stage_dir / "benchmarks.csv")
             write_frame(result.attribution, stage_dir / "attribution.csv")
             write_json(result.metrics.to_dict(), stage_dir / "metrics.json")
+            manifest = self._strategy_manifest(
+                run_id=run_id,
+                portfolio_model=portfolio_model_name,
+                risk_model=request.risk_model,
+                execution_model=request.execution_model,
+                training_window=request.training_window,
+                transaction_cost_bps=request.transaction_cost_bps,
+                selection=selection,
+            )
+            write_json(manifest, stage_dir / "strategy_manifest.json")
             summary = {
-                "model_name": request.model_name,
+                "model_name": portfolio_model_name,
+                "portfolio_model": portfolio_model_name,
+                "risk_model": request.risk_model,
+                "execution_model": request.execution_model,
                 "metrics": {key: float(value) for key, value in result.metrics.to_dict().items()},
                 "nav_rows": int(len(result.nav)),
+                "latest_nav": float(result.nav.iloc[-1]) if not result.nav.empty else None,
+                "latest_weights": (
+                    result.weights.iloc[-1].sort_values(ascending=False).head(5).rename_axis("asset").reset_index(name="target_weight").to_dict(orient="records")
+                    if not result.weights.empty
+                    else []
+                ),
+                "tradable_universe": [asset.asset for asset in DEFAULT_ASSETS],
+                "portfolio_diagnostics": portfolio_model.diagnostics().details,
+                "risk_diagnostics": risk_model.diagnostics().details,
             }
             if selection:
                 summary["selection"] = selection
@@ -488,6 +553,34 @@ class PipelineService:
                 setattr(config, field, value)
         return config
 
+    def _portfolio_model_name(self, request: PolicyRequest | BacktestRequest) -> str:
+        return request.portfolio_model or request.model_name
+
+    def _strategy_manifest(
+        self,
+        *,
+        run_id: str,
+        portfolio_model: str,
+        risk_model: str,
+        execution_model: str,
+        training_window: int,
+        transaction_cost_bps: float,
+        selection: dict | None,
+    ) -> dict:
+        return {
+            "run_id": run_id,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "signal_stage": "regime",
+            "signal_kind": "state",
+            "portfolio_model": portfolio_model,
+            "risk_model": risk_model,
+            "execution_model": execution_model,
+            "training_window": training_window,
+            "transaction_cost_bps": transaction_cost_bps,
+            "tradable_universe": [asset.asset for asset in DEFAULT_ASSETS],
+            "selection": selection,
+        }
+
     def _require_stage_success(self, run_id: str, stage: str) -> None:
         metadata = self.run_store.load_metadata(run_id)
         status = metadata["stages"].get(stage, {}).get("status")
@@ -623,12 +716,40 @@ class PipelineService:
         return {"categories": [_provider_group_payload(group, items_dir, request, item_definitions) for group in _provider_groups(request)]}
 
 
-class _BacktestPolicyAdapter:
-    def __init__(self, model) -> None:
-        self.model = model
+class _BacktestStrategyAdapter:
+    def __init__(self, portfolio_model, risk_model) -> None:
+        self.portfolio_model = portfolio_model
+        self.risk_model = risk_model
 
     def target_weights(self, returns_window, portfolio_regime, confidence, current_weights=None):
-        return self.model.allocate(returns_window, portfolio_regime, confidence, current_weights)
+        raw_weights = self.portfolio_model.allocate(returns_window, portfolio_regime, confidence, current_weights)
+        signal_row = pd.Series({"portfolio_regime": portfolio_regime, "regime_confidence": confidence})
+        weights = self.risk_model.apply(raw_weights, returns_window, signal_row, current_weights=current_weights).reindex(raw_weights.index).fillna(0.0)
+        if weights.sum() <= 0:
+            return raw_weights / raw_weights.sum()
+        return weights / weights.sum()
+
+
+def _weights_frame(raw_weights: pd.Series, final_weights: pd.Series, assets: list) -> pd.DataFrame:
+    asset_meta = {asset.asset: asset for asset in assets}
+    frame = (
+        pd.concat(
+            [
+                raw_weights.rename("raw_weight"),
+                final_weights.rename("target_weight"),
+            ],
+            axis=1,
+        )
+        .fillna(0.0)
+        .reset_index()
+        .rename(columns={"index": "asset"})
+    )
+    frame["risk_delta"] = frame["target_weight"] - frame["raw_weight"]
+    frame["region"] = frame["asset"].map(lambda asset: asset_meta.get(asset).region if asset in asset_meta else None)
+    frame["sleeve"] = frame["asset"].map(lambda asset: asset_meta.get(asset).sleeve if asset in asset_meta else None)
+    frame["lower_bound"] = frame["asset"].map(lambda asset: asset_meta.get(asset).min_weight if asset in asset_meta else 0.0)
+    frame["upper_bound"] = frame["asset"].map(lambda asset: asset_meta.get(asset).max_weight if asset in asset_meta else 1.0)
+    return frame.sort_values("target_weight", ascending=False).reset_index(drop=True)
 
 
 def _frame_summary(name: str, frame: pd.DataFrame) -> dict:

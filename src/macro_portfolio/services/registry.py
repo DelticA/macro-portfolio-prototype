@@ -3,6 +3,9 @@ from __future__ import annotations
 from ..models.policy.cvar import CvarPolicyModel
 from ..models.policy.risk_parity import RiskParityPolicyModel
 from ..models.policy.template import TemplateRulePolicyModel
+from ..models.risk.confidence_guard import ConfidenceGuardRiskModel
+from ..models.risk.none import NoRiskOverlayModel
+from ..models.risk.vol_target import VolTargetRiskModel
 from ..models.regime.gmm import GMMRegimeModel
 from ..models.regime.kmeans import KMeansRegimeModel
 from ..models.regime.rule_based import RuleBasedRegimeModel
@@ -22,6 +25,10 @@ def build_regime_model(name: str, **params):
 
 
 def build_policy_model(name: str, assets: list[AssetConfig], config: PolicyConfig):
+    return build_portfolio_model(name, assets, config)
+
+
+def build_portfolio_model(name: str, assets: list[AssetConfig], config: PolicyConfig):
     registry = {
         "template_rule": lambda: TemplateRulePolicyModel(assets=assets, config=config),
         "risk_parity": lambda: RiskParityPolicyModel(assets=assets, config=config),
@@ -29,4 +36,15 @@ def build_policy_model(name: str, assets: list[AssetConfig], config: PolicyConfi
     }
     if name not in registry:
         raise ValueError(f"Unsupported policy model: {name}")
+    return registry[name]()
+
+
+def build_risk_model(name: str, assets: list[AssetConfig]):
+    registry = {
+        "none": lambda: NoRiskOverlayModel(),
+        "confidence_guard": lambda: ConfidenceGuardRiskModel(assets=assets),
+        "vol_target": lambda: VolTargetRiskModel(assets=assets),
+    }
+    if name not in registry:
+        raise ValueError(f"Unsupported risk model: {name}")
     return registry[name]()
