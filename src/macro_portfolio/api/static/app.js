@@ -12,6 +12,39 @@ const providerState = {
   latestPayload: null,
 };
 
+// ============================================================
+// UTILITIES — toast & debounce
+// ============================================================
+function debounce(fn, delay) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+function showToast(message, type = "info", durationMs = 3500) {
+  let container = document.getElementById("toast-container");
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "toast-container";
+    container.className = "toast-container";
+    document.body.appendChild(container);
+  }
+  const icons = { error: "✕", success: "✓", info: "ℹ" };
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<em class="toast-icon">${icons[type] || icons.info}</em><span>${message}</span>`;
+  container.appendChild(toast);
+
+  const dismiss = () => {
+    toast.classList.add("toast-out");
+    toast.addEventListener("animationend", () => toast.remove(), { once: true });
+  };
+  const timer = setTimeout(dismiss, durationMs);
+  toast.addEventListener("click", () => { clearTimeout(timer); dismiss(); });
+}
+
 const dataState = {
   artifacts: {},
   charts: {}, // keyed by group id
@@ -201,14 +234,18 @@ function bindActions() {
     const run = await api.createRun();
     await refreshRuns(run.run_id);
   });
-  document.getElementById("providers-search")?.addEventListener("input", (event) => {
-    providerState.searchQuery = event.target.value.trim().toLowerCase();
-    renderProvidersTree();
-    if (providerState.latestGroups.length) renderProviderResults(providerState.latestGroups);
-  });
+  document.getElementById("providers-search")?.addEventListener(
+    "input",
+    debounce((event) => {
+      providerState.searchQuery = event.target.value.trim().toLowerCase();
+      renderProvidersTree();
+      if (providerState.latestGroups.length) renderProviderResults(providerState.latestGroups);
+    }, 250),
+  );
   document.getElementById("run-select").addEventListener("change", async () => {
     const runId = currentRunId();
-    if (runId) { await renderProviders(runId); await renderData(runId); await renderRegime(runId); await renderPolicy(runId); await renderBacktest(runId); }
+    const activeTab = document.querySelector(".tab-button.active")?.dataset?.tab;
+    if (runId && activeTab) await refreshActivePage(activeTab);
   });
   document.getElementById("run-providers").addEventListener("click", async () => { await runProvidersWithItems(null); });
   document.getElementById("load-providers-from-run").addEventListener("click", async () => {
@@ -281,6 +318,16 @@ async function refreshRuns(selectedId = null) {
 }
 
 function currentRunId() { return document.getElementById("run-select").value; }
+
+function updateTabBadge(tabId, status) {
+  const btn = document.querySelector(`.tab-button[data-tab="${tabId}"]`);
+  if (!btn) return;
+  if (status === "success" || status === "failed") {
+    btn.dataset.stageStatus = status;
+  } else {
+    delete btn.dataset.stageStatus;
+  }
+}
 
 function renderProvidersTree() {
   const container = document.getElementById("providers-tree");
@@ -413,10 +460,21 @@ function providerItemMarkup(item) {
 
 async function runProvidersWithItems(selectedItems) {
   const runId = currentRunId();
-  if (!runId) { setProvidersStatus("请先创建一个实验 run。"); return; }
+  if (!runId) { setProvidersStatus("请先创建一个实验 run。"); showToast("请先创建一个实验 run", "error"); return; }
+  const btn = document.getElementById("run-providers");
+  const originalText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "运行中…"; }
   setProvidersStatus(selectedItems ? `运行中: ${selectedItems.join(", ")}` : "运行中: 全量更新");
-  try { await api.runProviders(runId, collectProvidersPayload(selectedItems)); await renderProviders(runId); }
-  catch (error) { setProvidersStatus(`失败: ${error.message}`); }
+  try {
+    await api.runProviders(runId, collectProvidersPayload(selectedItems));
+    await renderProviders(runId);
+    showToast("数据拉取完成", "success");
+  } catch (error) {
+    setProvidersStatus(`失败: ${error.message}`);
+    showToast(`拉取失败: ${error.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
+  }
 }
 
 function collectProvidersPayload(selectedItems = null) {
@@ -452,6 +510,7 @@ async function renderProviders(runId) {
   setProvidersStatus(buildProvidersStatus(payload));
   document.getElementById("providers-log").textContent = payload.log || "";
   renderProviderResults(payload.summary?.categories || []);
+  updateTabBadge("providers-page", payload.status);
 }
 
 function renderProviderResults(groups) {
@@ -616,14 +675,21 @@ function filteredProviderCountLabel() {
 // ============================================================
 async function runDataStage() {
   const runId = currentRunId();
-  if (!runId) { setDataStatus("请先创建或选择一个实验 run。"); return; }
+  if (!runId) { setDataStatus("请先创建或选择一个实验 run。"); showToast("请先创建或选择一个实验 run", "error"); return; }
+  const btn = document.getElementById("run-data");
+  const originalText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "运行中…"; }
   setDataStatus("运行中: data");
   try {
     await api.runData(runId, collectDataPayload());
     await renderData(runId);
+    showToast("数据处理完成", "success");
   } catch (error) {
     setDataStatus(`失败: ${error.message}`);
     document.getElementById("data-log").textContent = String(error.message || error);
+    showToast(`处理失败: ${error.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
   }
 }
 
@@ -678,6 +744,7 @@ async function renderData(runId) {
     refreshHandoffSelectionSummary();
     document.getElementById("data-handoff-bar").classList.remove("hidden");
   }
+  updateTabBadge("data-page", payload.status);
 }
 
 function renderDataSummary(summary) {
@@ -1901,7 +1968,10 @@ function bucketKey(date, frequency) {
 // ============================================================
 async function runRegimeStage() {
   const runId = currentRunId();
-  if (!runId) { setRegimeStatus("请先创建或选择一个实验 run。"); return; }
+  if (!runId) { setRegimeStatus("请先创建或选择一个实验 run。"); showToast("请先创建或选择一个实验 run", "error"); return; }
+  const btn = document.getElementById("run-regime");
+  const originalText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "运行中…"; }
   setRegimeStatus("运行中: regime");
   try {
     const payload = {
@@ -1912,9 +1982,13 @@ async function runRegimeStage() {
     };
     await api.runRegime(runId, payload);
     await renderRegime(runId);
+    showToast("状态识别完成", "success");
   } catch (error) {
     setRegimeStatus(`失败: ${error.message}`);
     document.getElementById("regime-log").textContent = String(error.message || error);
+    showToast(`识别失败: ${error.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
   }
 }
 
@@ -1929,11 +2003,13 @@ async function renderRegime(runId) {
     const artifact = await safeGetArtifact(runId, "regime", "regime");
     renderRegimeWorkbench(payload.summary || {}, artifact?.rows || payload.preview?.regime || []);
     document.getElementById("regime-handoff-bar")?.classList.remove("hidden");
+    updateTabBadge("regime-page", "success");
     return;
   }
   destroyResearchChart("regimeChart");
   renderRegimeWorkbench(payload.summary || {}, []);
   document.getElementById("regime-handoff-bar")?.classList.add("hidden");
+  updateTabBadge("regime-page", payload.status);
 }
 
 function renderRegimeRibbon(summary) {
@@ -2139,30 +2215,38 @@ function renderRegimeWorkbench(summary, rows) {
 // ============================================================
 // POLICY STAGE
 // ============================================================
-async function runPolicyStage() {
-  const runId = currentRunId();
-  if (!runId) { setPolicyStatus("请先创建或选择一个实验 run。"); return; }
-  setPolicyStatus("运行中: strategy composer");
-  try {
-    await api.runPolicy(runId, collectPolicyPayload());
-    await renderPolicy(runId);
-  } catch (error) {
-    setPolicyStatus(`失败: ${error.message}`);
-    document.getElementById("policy-log").textContent = String(error.message || error);
-  }
-}
-
-function collectPolicyPayload() {
-  const portfolioModel = document.getElementById("policy-portfolio-model")?.value || "cvar";
+// Shared payload builder for policy and backtest (fields only differ by element-id prefix)
+function collectPortfolioPayload(prefix) {
+  const portfolioModel = document.getElementById(`${prefix}-portfolio-model`)?.value || "cvar";
   return {
     model_name: portfolioModel,
     portfolio_model: portfolioModel,
-    risk_model: document.getElementById("policy-risk-model")?.value || "confidence_guard",
+    risk_model: document.getElementById(`${prefix}-risk-model`)?.value || "confidence_guard",
     execution_model: "immediate",
-    training_window: Number(document.getElementById("policy-training-window")?.value || 60),
-    transaction_cost_bps: Number(document.getElementById("policy-transaction-cost")?.value || 5),
+    training_window: Number(document.getElementById(`${prefix}-training-window`)?.value || 60),
+    transaction_cost_bps: Number(document.getElementById(`${prefix}-transaction-cost`)?.value || 5),
     overrides: {},
   };
+}
+
+async function runPolicyStage() {
+  const runId = currentRunId();
+  if (!runId) { setPolicyStatus("请先创建或选择一个实验 run。"); showToast("请先创建或选择一个实验 run", "error"); return; }
+  const btn = document.getElementById("run-policy");
+  const originalText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "运行中…"; }
+  setPolicyStatus("运行中: strategy composer");
+  try {
+    await api.runPolicy(runId, collectPortfolioPayload("policy"));
+    await renderPolicy(runId);
+    showToast("组合构建完成", "success");
+  } catch (error) {
+    setPolicyStatus(`失败: ${error.message}`);
+    document.getElementById("policy-log").textContent = String(error.message || error);
+    showToast(`策略失败: ${error.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
+  }
 }
 
 async function renderPolicy(runId) {
@@ -2176,11 +2260,13 @@ async function renderPolicy(runId) {
     const artifact = await safeGetArtifact(runId, "policy", "weights_target");
     renderPolicyWorkbench(payload.summary || {}, artifact?.rows || payload.preview?.weights_target || []);
     document.getElementById("policy-handoff-bar")?.classList.remove("hidden");
+    updateTabBadge("policy-page", "success");
     return;
   }
   destroyResearchChart("policyChart");
   renderPolicyWorkbench(payload.summary || {}, []);
   document.getElementById("policy-handoff-bar")?.classList.add("hidden");
+  updateTabBadge("policy-page", payload.status);
 }
 
 function renderPolicyRibbon(summary) {
@@ -2361,28 +2447,22 @@ function renderPolicyWorkbench(summary, rows) {
 // ============================================================
 async function runBacktestStage() {
   const runId = currentRunId();
-  if (!runId) { setBacktestStatus("请先创建或选择一个实验 run。"); return; }
+  if (!runId) { setBacktestStatus("请先创建或选择一个实验 run。"); showToast("请先创建或选择一个实验 run", "error"); return; }
+  const btn = document.getElementById("run-backtest");
+  const originalText = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "运行中…"; }
   setBacktestStatus("运行中: backtest");
   try {
-    await api.runBacktest(runId, collectBacktestPayload());
+    await api.runBacktest(runId, collectPortfolioPayload("backtest"));
     await renderBacktest(runId);
+    showToast("回测完成", "success");
   } catch (error) {
     setBacktestStatus(`失败: ${error.message}`);
     document.getElementById("backtest-log").textContent = String(error.message || error);
+    showToast(`回测失败: ${error.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalText; }
   }
-}
-
-function collectBacktestPayload() {
-  const portfolioModel = document.getElementById("backtest-portfolio-model")?.value || "cvar";
-  return {
-    model_name: portfolioModel,
-    portfolio_model: portfolioModel,
-    risk_model: document.getElementById("backtest-risk-model")?.value || "confidence_guard",
-    execution_model: "immediate",
-    training_window: Number(document.getElementById("backtest-training-window")?.value || 60),
-    transaction_cost_bps: Number(document.getElementById("backtest-transaction-cost")?.value || 5),
-    overrides: {},
-  };
 }
 
 async function renderBacktest(runId) {
@@ -2398,10 +2478,12 @@ async function renderBacktest(runId) {
       safeGetArtifact(runId, "backtest", "benchmarks"),
     ]);
     renderBacktestWorkbench(payload.summary || {}, navArtifact?.rows || [], benchmarkArtifact?.rows || []);
+    updateTabBadge("backtest-page", "success");
     return;
   }
   destroyResearchChart("backtestChart");
   renderBacktestWorkbench(payload.summary || {}, [], []);
+  updateTabBadge("backtest-page", payload.status);
 }
 
 function renderBacktestRibbon(summary) {
