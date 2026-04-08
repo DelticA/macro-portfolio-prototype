@@ -21,6 +21,8 @@
         <div class="hero-actions">
           <button id="create-run">创建新实验</button>
           <select id="run-select"></select>
+          <button id="rename-run" class="secondary-button" type="button" title="重命名当前 Run">✏️</button>
+          <button id="delete-run" class="secondary-button is-danger" type="button" title="删除当前 Run">🗑️</button>
         </div>
       </header>
 
@@ -174,13 +176,19 @@
             <div class="form-grid">
               <label>模型
                 <select id="regime-model">
-                  <option value="rule_based">rule_based（规则分类）</option>
-                  <option value="kmeans">kmeans（聚类）</option>
-                  <option value="gmm">gmm（混合高斯）</option>
+                  <option value="rule_based">rule_based（按增长/通胀象限打标签）</option>
+                  <option value="kmeans">kmeans（按历史相似性硬聚类）</option>
+                  <option value="gmm">gmm（按概率分布软聚类）</option>
                 </select>
               </label>
               <label>平滑窗口<input id="regime-smoothing" type="number" value="3" /></label>
               <label>状态数量<input id="regime-n-states" type="number" value="4" /></label>
+            </div>
+            <div id="regime-parameter-help" class="section-gap">
+              <div class="hint-box">这里会说明当前模型真正会使用哪些参数。</div>
+            </div>
+            <div id="regime-teaching" class="section-gap">
+              <div class="hint-box">这里会显示三种状态识别方法的教学说明、结果读法和状态词典。</div>
             </div>
             <div id="regime-ribbon" class="section-gap">
               <div class="hint-box">这里会显示信号类型、拟合窗口和当前状态的摘要。</div>
@@ -237,6 +245,20 @@
               <label>训练窗口<input id="policy-training-window" type="number" value="60" /></label>
               <label>参考成本 (bps)<input id="policy-transaction-cost" type="number" value="5" /></label>
             </div>
+            <details class="advanced-params" id="policy-advanced-params">
+              <summary>▸ 高级参数（PolicyConfig 调参）</summary>
+              <div class="form-grid adv-param-grid">
+                <label>BTC 上限 (%)<input id="policy-btc-max-weight" type="number" step="0.5" min="0" max="30" value="10" /></label>
+                <label>商品上限 (%)<input id="policy-oil-max-weight" type="number" step="0.5" min="0" max="30" value="15" /></label>
+                <label>单国权益上限 (%)<input id="policy-country-equity-cap" type="number" step="1" min="10" max="80" value="45" /></label>
+                <label>最大单资产上限 (%)<input id="policy-max-weight-default" type="number" step="1" min="5" max="60" value="35" /></label>
+                <label>换手惩罚系数<input id="policy-turnover-penalty" type="number" step="0.05" min="0" max="5" value="0.5" /></label>
+                <label>置信度混合强度<input id="policy-confidence-blend" type="number" step="0.05" min="0" max="1" value="0.4" /></label>
+                <label>CVaR 分位数 (%)<input id="policy-cvar-alpha" type="number" step="0.5" min="85" max="99" value="95" /></label>
+                <label>最小交易仓位 (%)<input id="policy-min-trade-weight" type="number" step="0.1" min="0" max="5" value="1" /></label>
+              </div>
+              <p class="adv-param-note">⚑ 调整后在下次点击「生成目标组合」时生效。参数写入 overrides.policy_config 并存入 strategy_manifest.json。</p>
+            </details>
             <div id="policy-ribbon" class="section-gap">
               <div class="hint-box">这里会显示组合构建模型、风险叠加层和当前交易资产池摘要。</div>
             </div>
@@ -292,6 +314,20 @@
               <label>训练窗口<input id="backtest-training-window" type="number" value="60" /></label>
               <label>交易成本 (bps)<input id="backtest-transaction-cost" type="number" value="5" /></label>
             </div>
+            <details class="advanced-params" id="backtest-advanced-params">
+              <summary>▸ 高级参数（PolicyConfig 调参）</summary>
+              <div class="form-grid adv-param-grid">
+                <label>BTC 上限 (%)<input id="backtest-btc-max-weight" type="number" step="0.5" min="0" max="30" value="10" /></label>
+                <label>商品上限 (%)<input id="backtest-oil-max-weight" type="number" step="0.5" min="0" max="30" value="15" /></label>
+                <label>单国权益上限 (%)<input id="backtest-country-equity-cap" type="number" step="1" min="10" max="80" value="45" /></label>
+                <label>最大单资产上限 (%)<input id="backtest-max-weight-default" type="number" step="1" min="5" max="60" value="35" /></label>
+                <label>换手惩罚系数<input id="backtest-turnover-penalty" type="number" step="0.05" min="0" max="5" value="0.5" /></label>
+                <label>置信度混合强度<input id="backtest-confidence-blend" type="number" step="0.05" min="0" max="1" value="0.4" /></label>
+                <label>CVaR 分位数 (%)<input id="backtest-cvar-alpha" type="number" step="0.5" min="85" max="99" value="95" /></label>
+                <label>最小交易仓位 (%)<input id="backtest-min-trade-weight" type="number" step="0.1" min="0" max="5" value="1" /></label>
+              </div>
+              <p class="adv-param-note">⚑ 调整后在下次点击「执行回测」时生效。不同参数组合可以新建 Run 并对比。</p>
+            </details>
             <div id="backtest-ribbon" class="section-gap">
               <div class="hint-box">这里会显示策略栈、样本长度和回测结果摘要。</div>
             </div>
@@ -300,6 +336,21 @@
             </div>
             <div id="backtest-workbench" class="section-gap">
               <div class="hint-box">这里会显示 NAV 与基准对比、最近一期持仓和关键结果。</div>
+            </div>
+            <div class="section-gap" id="regime-perf-section">
+              <div class="hint-box">执行回测后，这里会显示各宏观状态下的绩效分解。</div>
+            </div>
+            <div class="section-gap" id="compare-section">
+              <div class="group-head" style="margin-bottom:10px">
+                <div><p class="eyebrow">Multi-Run Compare</p><h3>多 Run 回测对比</h3></div>
+              </div>
+              <div class="form-grid" style="grid-template-columns:1fr auto;gap:8px;align-items:end">
+                <label style="margin:0">选择要对比的 Runs（可多选）
+                  <select id="compare-run-select" multiple size="4" style="height:auto"></select>
+                </label>
+                <button id="run-compare" class="secondary-button" type="button">对比所选 →</button>
+              </div>
+              <div id="compare-result" class="section-gap"></div>
             </div>
           </article>
           <article class="panel sticky-panel">

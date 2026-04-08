@@ -70,7 +70,7 @@ class BacktestEngine:
         weights = pd.DataFrame(weights_history)
         attribution = pd.DataFrame(attribution_rows).set_index("date")
         benchmarks = self._benchmarks(asset_returns.loc[monthly_returns.index])
-        metrics = self._metrics(monthly_returns, benchmarks)
+        metrics = self._metrics(monthly_returns, benchmarks, attribution)
         return BacktestResult(nav=nav, weights=weights, monthly_returns=monthly_returns, metrics=metrics, benchmarks=benchmarks, attribution=attribution)
 
     def _benchmarks(self, returns: pd.DataFrame) -> pd.DataFrame:
@@ -86,8 +86,8 @@ class BacktestEngine:
             data[name] = (returns * weights).sum(axis=1)
         return pd.DataFrame(data)
 
-    def _metrics(self, monthly_returns: pd.Series, benchmarks: pd.DataFrame) -> pd.Series:
-        metrics = {
+    def _metrics(self, monthly_returns: pd.Series, benchmarks: pd.DataFrame, attribution: pd.DataFrame | None = None) -> pd.Series:
+        metrics: dict = {
             "cagr": self._cagr(monthly_returns),
             "annualized_vol": monthly_returns.std(ddof=0) * np.sqrt(12),
             "sharpe": self._sharpe(monthly_returns),
@@ -98,6 +98,26 @@ class BacktestEngine:
         }
         for name, series in benchmarks.items():
             metrics[f"excess_return_vs_{name}"] = self._cagr(monthly_returns) - self._cagr(series)
+
+        # Per-regime breakdown: evaluate signal quality per macro state
+        if attribution is not None and not attribution.empty and "portfolio_regime" in attribution.columns:
+            regime_metrics: dict[str, dict] = {}
+            for regime, group in attribution.groupby("portfolio_regime"):
+                regime_rets = group["net_return"]
+                if len(regime_rets) < 2:
+                    continue
+                regime_metrics[str(regime)] = {
+                    "cagr": round(float(self._cagr(regime_rets)), 6),
+                    "annualized_vol": round(float(regime_rets.std(ddof=0) * np.sqrt(12)), 6),
+                    "sharpe": round(float(self._sharpe(regime_rets)), 6),
+                    "max_drawdown": round(float(self._max_drawdown(regime_rets)), 6),
+                    "months": int(len(regime_rets)),
+                    "avg_monthly_return": round(float(regime_rets.mean()), 6),
+                    "avg_gross_return": round(float(group["gross_return"].mean()), 6),
+                    "avg_transaction_cost": round(float(group["transaction_cost"].mean()), 6),
+                }
+            metrics["regime_metrics"] = regime_metrics
+
         return pd.Series(metrics)
 
     def _cagr(self, monthly_returns: pd.Series) -> float:

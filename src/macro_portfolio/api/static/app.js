@@ -67,6 +67,8 @@ const researchState = {
   regimeChart: null,
   policyChart: null,
   backtestChart: null,
+  regimeSummary: {},
+  regimeRows: [],
 };
 
 const CUSTOM_MARKETS = {
@@ -100,6 +102,67 @@ const CUSTOM_MARKETS = {
 };
 
 const DATA_GROUP_ORDER = ["asset_price", "rates", "inflation", "growth", "money_supply", "trade", "credit", "fx", "other"];
+
+const REGIME_MODEL_GUIDES = {
+  rule_based: {
+    label: "rule_based",
+    title: "规则分类",
+    tag: "最易解释",
+    summary: "先把中美增长和通胀做成分数，再用象限法映射成固定宏观状态。",
+    whenToUse: "第一次跑框架，或希望状态名本身就带有经济含义时。",
+    resultRead: "状态名可以直接读，重点再看置信度和近几期是否连续。",
+    parameterNote: "这个模型只使用“平滑窗口”，不会用到“状态数量”。",
+    stateNote: "输出的是固定状态词典，适合直接拿去给第 4 页做组合切换。",
+  },
+  kmeans: {
+    label: "kmeans",
+    title: "硬聚类",
+    tag: "结构发现",
+    summary: "把每期特征看成一个点，按相似度分到若干个簇里，每期只能属于一个状态。",
+    whenToUse: "怀疑市场结构比“增长/通胀四象限”更复杂，想让数据自己分组时。",
+    resultRead: "状态名只是簇编号，需要结合状态画像来命名和理解。",
+    parameterNote: "这个模型主要使用“状态数量”，平滑窗口不会参与拟合。",
+    stateNote: "边界清晰，但切换时会显得更“硬”，适合找典型历史情景。",
+  },
+  gmm: {
+    label: "gmm",
+    title: "概率聚类",
+    tag: "边界更柔和",
+    summary: "假设市场由多个分布混合而成，每期取最可能的状态，并保留概率意义上的置信度。",
+    whenToUse: "状态之间有重叠，或者更关注切换边界阶段时。",
+    resultRead: "优先看置信度，因为它更接近“当前像不像这个状态”的概率。",
+    parameterNote: "这个模型主要使用“状态数量”，平滑窗口不会参与拟合。",
+    stateNote: "适合观察模糊过渡期，但状态名同样需要靠画像和样本特征来解释。",
+  },
+};
+
+const REGIME_STATE_DICTIONARY = {
+  global_easing_growth: {
+    title: "全球宽松增长",
+    bias: "偏风险",
+    description: "增长回暖而通胀偏温和，通常是更友好的风险资产环境。",
+  },
+  reflation: {
+    title: "再通胀",
+    bias: "权益/商品偏强",
+    description: "增长和通胀一起抬升，顺周期资产往往更有弹性，长久期资产更容易承压。",
+  },
+  disinflationary_slowdown: {
+    title: "去通胀式放缓",
+    bias: "偏防御",
+    description: "增长走弱且通胀回落，更像防御和久期资产相对占优的阶段。",
+  },
+  stagflation_pressure: {
+    title: "滞胀压力",
+    bias: "风险收缩",
+    description: "增长弱但通胀高，是最难配置的组合环境，通常需要压低风险预算。",
+  },
+  china_recovery_us_weak: {
+    title: "中国修复 / 美国偏弱",
+    bias: "中国产业链相对占优",
+    description: "中国增长修复快于美国，通常意味着区域分化行情会更明显。",
+  },
+};
 
 const selectionBandPlugin = {
   id: "selectionBandOverlay",
@@ -185,6 +248,15 @@ const api = {
   async openFolder(runId, target) {
     return handle(await fetch(`/api/runs/${runId}/open?target=${encodeURIComponent(target)}`, { method: "POST" }));
   },
+  async deleteRun(runId) {
+    return handle(await fetch(`/api/runs/${runId}`, { method: "DELETE" }));
+  },
+  async updateRunLabel(runId, label) {
+    return handle(await fetch(`/api/runs/${runId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label }) }));
+  },
+  async compareBacktest(runIds) {
+    return handle(await fetch(`/api/compare/backtest?run_ids=${encodeURIComponent(runIds.join(","))}`))
+  },
 };
 
 // ============================================================
@@ -193,6 +265,12 @@ const api = {
 async function init() {
   bindTabs();
   bindActions();
+  // Auto-fill providers end date to today
+  const endDateInput = document.getElementById("providers-end-date");
+  if (endDateInput) {
+    const today = new Date().toISOString().slice(0, 10);
+    endDateInput.value = today;
+  }
   await loadProvidersConfig();
   await refreshRuns();
 }
@@ -263,11 +341,46 @@ function bindActions() {
   document.getElementById("open-data-folder").addEventListener("click", async () => { await openDataFolder(); });
   document.getElementById("goto-regime").addEventListener("click", () => { activateTab("regime-page"); });
   document.getElementById("run-regime").addEventListener("click", async () => { await runRegimeStage(); });
+  document.getElementById("regime-model")?.addEventListener("change", () => { syncRegimeTeachingUI(); });
+  document.getElementById("regime-smoothing")?.addEventListener("input", () => { syncRegimeTeachingUI(); });
+  document.getElementById("regime-n-states")?.addEventListener("input", () => { syncRegimeTeachingUI(); });
   document.getElementById("goto-policy")?.addEventListener("click", () => { activateTab("policy-page"); });
   document.getElementById("run-policy")?.addEventListener("click", async () => { await runPolicyStage(); });
   document.getElementById("goto-backtest")?.addEventListener("click", () => { activateTab("backtest-page"); });
   document.getElementById("run-backtest")?.addEventListener("click", async () => { await runBacktestStage(); });
+  // Run management
+  document.getElementById("rename-run")?.addEventListener("click", async () => {
+    const runId = currentRunId();
+    if (!runId) return showToast("请先选择一个 Run", "error");
+    const newLabel = window.prompt("输入新名称", document.getElementById("run-select").selectedOptions[0]?.text?.split(" · ")[0] || "");
+    if (!newLabel?.trim()) return;
+    try {
+      await api.updateRunLabel(runId, newLabel.trim());
+      await refreshRuns(runId);
+      showToast("重命名成功", "success");
+    } catch (e) { showToast(`重命名失败: ${e.message}`, "error"); }
+  });
+  document.getElementById("delete-run")?.addEventListener("click", async () => {
+    const runId = currentRunId();
+    if (!runId) return showToast("请先选择一个 Run", "error");
+    if (!window.confirm(`确认删除 Run: ${runId}？此操作不可恢复。`)) return;
+    try {
+      await api.deleteRun(runId);
+      showToast("已删除", "success");
+      await refreshRuns();
+    } catch (e) { showToast(`删除失败: ${e.message}`, "error"); }
+  });
+  document.getElementById("run-compare")?.addEventListener("click", async () => {
+    const compareSelect = document.getElementById("compare-run-select");
+    const selected = Array.from(compareSelect?.selectedOptions || []).map((o) => o.value).filter(Boolean);
+    if (selected.length < 1) return showToast("请先选择至少 1 个 Run", "error");
+    try {
+      const result = await api.compareBacktest(selected);
+      renderCompareResult(result.items);
+    } catch (e) { showToast(`对比失败: ${e.message}`, "error"); }
+  });
   document.addEventListener("click", (event) => {
+    const regimeModelButton = event.target?.closest?.("[data-regime-model]");
     if (event.target?.dataset?.addCustomMarket) addCustomEquity(event.target.dataset.addCustomMarket);
     if (event.target?.id === "apply-data-selection") applyDataSelection();
     if (event.target?.id === "use-view-series") useCurrentViewSeriesForHandoff();
@@ -282,11 +395,17 @@ function bindActions() {
     if (event.target?.dataset?.selectionPreset) {
       applySelectionPreset(event.target.dataset.selectionPreset);
     }
+    if (regimeModelButton?.dataset?.regimeModel) {
+      const modelSelect = document.getElementById("regime-model");
+      if (modelSelect) modelSelect.value = regimeModelButton.dataset.regimeModel;
+      syncRegimeTeachingUI();
+    }
     if (event.target?.classList.contains("chart-normalize-toggle")) {
       const groupKey = event.target.dataset.group;
       updateGroupChart(groupKey);
     }
   });
+  syncRegimeTeachingUI();
 }
 
 // ============================================================
@@ -306,9 +425,16 @@ async function loadProvidersConfig() {
 async function refreshRuns(selectedId = null) {
   const data = await api.getRuns();
   const select = document.getElementById("run-select");
-  select.innerHTML = data.items.map((item) => `<option value="${item.run_id}">${item.run_id} · ${item.status}</option>`).join("");
+  const makeOption = (item) => {
+    const label = item.label ? `${item.label} · ${item.status}` : `${item.run_id.slice(0, 8)} · ${item.status}`;
+    return `<option value="${item.run_id}">${label}</option>`;
+  };
+  select.innerHTML = data.items.map(makeOption).join("");
   const copySelect = document.getElementById("providers-copy-source");
-  copySelect.innerHTML = `<option value="">选择已有实验作为数据来源</option>` + data.items.map((item) => `<option value="${item.run_id}">${item.run_id} · ${item.status}</option>`).join("");
+  copySelect.innerHTML = `<option value="">选择已有实验作为数据来源</option>` + data.items.map(makeOption).join("");
+  // Populate the multi-run compare select
+  const compareSelect = document.getElementById("compare-run-select");
+  if (compareSelect) compareSelect.innerHTML = data.items.map(makeOption).join("");
   if (selectedId) select.value = selectedId;
   if (!copySelect.value && data.items.length > 1) {
     const fallback = data.items.find((item) => item.run_id !== select.value);
@@ -1963,6 +2089,348 @@ function bucketKey(date, frequency) {
   return `${year}-${month}`;
 }
 
+function currentRegimeModel() {
+  return document.getElementById("regime-model")?.value || "rule_based";
+}
+
+function regimeGuide(modelName = currentRegimeModel()) {
+  return REGIME_MODEL_GUIDES[modelName] || REGIME_MODEL_GUIDES.rule_based;
+}
+
+function regimeModelDisplay(modelName = currentRegimeModel()) {
+  const guide = regimeGuide(modelName);
+  return `${guide.label} · ${guide.title}`;
+}
+
+function regimeParameterUsage(modelName = currentRegimeModel()) {
+  return {
+    usesSmoothing: modelName === "rule_based",
+    usesNStates: modelName !== "rule_based",
+  };
+}
+
+function regimeStateInfo(stateName, modelName = currentRegimeModel()) {
+  if (!stateName) {
+    return {
+      title: "待生成",
+      bias: "等待运行",
+      description: "运行后这里会把当前状态翻译成更直观的中文含义。",
+    };
+  }
+  if (REGIME_STATE_DICTIONARY[stateName]) return REGIME_STATE_DICTIONARY[stateName];
+  return {
+    title: stateName,
+    bias: modelName === "gmm" ? "概率聚类" : modelName === "kmeans" ? "距离聚类" : "模型状态",
+    description: "这是模型自动发现的状态编号，没有固定经济标签，需要结合下方画像来命名。",
+  };
+}
+
+function regimeConfidenceMeaning(modelName = currentRegimeModel(), value = null) {
+  if (value == null || !Number.isFinite(Number(value))) {
+    return "高置信度不代表一定涨跌，只代表当前样本更像这个状态。";
+  }
+  if (modelName === "gmm") {
+    return `当前 ${formatPct(value)} 更接近“属于该状态的概率”，适合观察边界期。`;
+  }
+  if (modelName === "kmeans") {
+    return `当前 ${formatPct(value)} 更接近“离该簇中心有多近”，越高越像典型样本。`;
+  }
+  return `当前 ${formatPct(value)} 代表宏观分数强弱，越高说明这个状态更明确。`;
+}
+
+function formatSignedScore(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "-";
+  const numeric = Number(value);
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}`;
+}
+
+function regimeCountsTotal(counts = {}) {
+  return Object.values(counts).reduce((sum, count) => sum + Number(count || 0), 0);
+}
+
+function regimeShare(count, total) {
+  return total ? formatPct(Number(count || 0) / total) : "-";
+}
+
+function buildRegimeStateProfiles(rows = []) {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const state = row.portfolio_regime || row.state_label || "-";
+    if (!grouped.has(state)) {
+      grouped.set(state, {
+        state,
+        count: 0,
+        confidence: 0,
+        growthScoreUs: 0,
+        inflationScoreUs: 0,
+        growthScoreCn: 0,
+        inflationScoreCn: 0,
+      });
+    }
+    const item = grouped.get(state);
+    item.count += 1;
+    item.confidence += Number(row.regime_confidence || 0);
+    item.growthScoreUs += Number(row.growth_score_us || 0);
+    item.inflationScoreUs += Number(row.inflation_score_us || 0);
+    item.growthScoreCn += Number(row.growth_score_cn || 0);
+    item.inflationScoreCn += Number(row.inflation_score_cn || 0);
+  });
+  const total = rows.length || 1;
+  return Array.from(grouped.values()).map((item) => ({
+    ...item,
+    share: item.count / total,
+    avgConfidence: item.confidence / item.count,
+    avgGrowthScoreUs: item.growthScoreUs / item.count,
+    avgInflationScoreUs: item.inflationScoreUs / item.count,
+    avgGrowthScoreCn: item.growthScoreCn / item.count,
+    avgInflationScoreCn: item.inflationScoreCn / item.count,
+  }));
+}
+
+function renderRegimeParameterHelp(summary = researchState.regimeSummary || {}) {
+  const container = document.getElementById("regime-parameter-help");
+  if (!container) return;
+  const selectedModel = currentRegimeModel();
+  const guide = regimeGuide(selectedModel);
+  const { usesSmoothing, usesNStates } = regimeParameterUsage(selectedModel);
+  const smoothingInput = document.getElementById("regime-smoothing");
+  const nStatesInput = document.getElementById("regime-n-states");
+  const smoothingLabel = smoothingInput?.closest("label");
+  const nStatesLabel = nStatesInput?.closest("label");
+
+  if (smoothingInput) smoothingInput.disabled = !usesSmoothing;
+  if (nStatesInput) nStatesInput.disabled = !usesNStates;
+  smoothingLabel?.classList.toggle("is-disabled", !usesSmoothing);
+  nStatesLabel?.classList.toggle("is-disabled", !usesNStates);
+
+  let statusCopy = "切换模型时，这里会告诉你哪些参数真的参与了拟合。";
+  if (summary.model_name && summary.model_name === selectedModel) {
+    statusCopy = `当前结果已经是 ${regimeModelDisplay(selectedModel)}，可以直接对照下面的读法解释。`;
+  } else if (summary.model_name && summary.model_name !== selectedModel) {
+    statusCopy = `当前选择已改成 ${regimeModelDisplay(selectedModel)}，但下面结果仍然来自上一次运行的 ${regimeModelDisplay(summary.model_name)}。`;
+  }
+
+  container.innerHTML = `
+    <div class="parameter-help-card">
+      <div class="parameter-help-header">
+        <div>
+          <p class="eyebrow">Parameter Guide</p>
+          <h3>${guide.title} 当前参数说明</h3>
+          <p class="parameter-help-copy">${guide.parameterNote}</p>
+        </div>
+        <span class="mono-chip">${guide.tag}</span>
+      </div>
+      <div class="parameter-pill-row">
+        <span class="parameter-pill ${usesSmoothing ? "is-active" : "is-inactive"}">平滑窗口 ${usesSmoothing ? `生效 · 当前 ${smoothingInput?.value || "-"}` : "未使用"}</span>
+        <span class="parameter-pill ${usesNStates ? "is-active" : "is-inactive"}">状态数量 ${usesNStates ? `生效 · 当前 ${nStatesInput?.value || "-"}` : "未使用"}</span>
+      </div>
+      <div class="workspace-note"><strong>当前提示</strong><br />${statusCopy}</div>
+    </div>
+  `;
+}
+
+function buildRuleBasedLegend(summary = {}) {
+  const currentState = summary.model_name === "rule_based" ? summary.latest_regime : "";
+  return `
+    <div class="spotlight-section">
+      <div class="group-head">
+        <div><p class="eyebrow">State Dictionary</p><h3>规则模型状态词典</h3></div>
+        <span class="mono-chip">固定 5 类宏观状态</span>
+      </div>
+      <div class="state-legend-grid">
+        ${Object.entries(REGIME_STATE_DICTIONARY).map(([state, info]) => `
+          <div class="state-legend-card ${state === currentState ? "is-current" : ""}">
+            <div class="state-legend-top">
+              <div>
+                <div class="state-legend-title">${info.title}</div>
+                <span class="state-legend-key">${state}</span>
+              </div>
+              <span class="state-bias-chip">${info.bias}</span>
+            </div>
+            <p>${info.description}</p>
+          </div>
+        `).join("")}
+      </div>
+      <div class="inline-note">规则模型的状态名可以直接拿来解释市场环境，因此最适合作为教学起点。</div>
+    </div>
+  `;
+}
+
+function buildClusterLegend(summary = {}, rows = [], selectedModel = currentRegimeModel()) {
+  const genericCards = `
+    <div class="state-legend-grid">
+      <div class="state-legend-card">
+        <div class="state-legend-title">先给状态命名</div>
+        <p>像 <code>${selectedModel}_state_0</code> 这样的名字只是编号，要结合增长/通胀分数给它起一个研究上的名字。</p>
+      </div>
+      <div class="state-legend-card">
+        <div class="state-legend-title">再看置信度</div>
+        <p>${selectedModel === "gmm" ? "GMM 的置信度更像“属于该状态的概率”。" : "KMeans 的置信度更像“离该簇中心有多近”。"}</p>
+      </div>
+      <div class="state-legend-card">
+        <div class="state-legend-title">最后看占比</div>
+        <p>样本占比太小的状态更像少数极端情景，适合研究，但不一定适合直接拿去做稳健配置。</p>
+      </div>
+    </div>
+  `;
+
+  if (!rows.length || !summary.model_name || summary.model_name !== selectedModel) {
+    return `
+      <div class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Cluster Decoder</p><h3>聚类模型怎么解读</h3></div>
+          <span class="mono-chip">${selectedModel === "gmm" ? "概率型状态" : "距离型状态"}</span>
+        </div>
+        ${genericCards}
+      </div>
+    `;
+  }
+
+  const currentState = summary.latest_regime;
+  const profiles = buildRegimeStateProfiles(rows)
+    .sort((left, right) => (Number(right.state === currentState) - Number(left.state === currentState)) || (right.count - left.count))
+    .slice(0, 4);
+
+  return `
+    <div class="spotlight-section">
+      <div class="group-head">
+        <div><p class="eyebrow">Cluster Decoder</p><h3>本次运行的状态画像</h3></div>
+        <span class="mono-chip">最近结果来自 ${regimeModelDisplay(selectedModel)}</span>
+      </div>
+      <div class="state-legend-grid">
+        ${profiles.map((profile) => `
+          <div class="state-legend-card ${profile.state === currentState ? "is-current" : ""}">
+            <div class="state-legend-top">
+              <div>
+                <div class="state-legend-title">${profile.state}</div>
+                <span class="state-legend-key">${profile.count} 期 · 占比 ${formatPct(profile.share)}</span>
+              </div>
+              <span class="state-bias-chip">平均置信度 ${formatPct(profile.avgConfidence)}</span>
+            </div>
+            <div class="profile-metrics">
+              <div class="profile-metric">US 增长<strong>${formatSignedScore(profile.avgGrowthScoreUs)}</strong></div>
+              <div class="profile-metric">US 通胀<strong>${formatSignedScore(profile.avgInflationScoreUs)}</strong></div>
+              <div class="profile-metric">CN 增长<strong>${formatSignedScore(profile.avgGrowthScoreCn)}</strong></div>
+              <div class="profile-metric">CN 通胀<strong>${formatSignedScore(profile.avgInflationScoreCn)}</strong></div>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+      <div class="inline-note">这些分数是状态内平均 z-score。正值代表相对更强，负值代表相对更弱，用它们给聚类状态起名字会更稳妥。</div>
+    </div>
+  `;
+}
+
+function renderRegimeTeaching(summary = researchState.regimeSummary || {}, rows = researchState.regimeRows || []) {
+  const container = document.getElementById("regime-teaching");
+  if (!container) return;
+  const selectedModel = currentRegimeModel();
+  const guide = regimeGuide(selectedModel);
+  const summaryModel = summary.model_name;
+  const modelMatchesLatestResult = summaryModel && summaryModel === selectedModel;
+  const stateInfo = modelMatchesLatestResult
+    ? regimeStateInfo(summary.latest_regime, selectedModel)
+    : {
+      title: "等待按当前模型重新运行",
+      description: selectedModel === "rule_based"
+        ? "重新执行后，这里会把最新状态翻译成固定的宏观词典。"
+        : "重新执行后，这里会根据状态画像和置信度来解读新的聚类状态。",
+    };
+  const lessons = [
+    {
+      step: "1",
+      title: "先确认输入窗口",
+      copy: summary.selection?.start
+        ? `当前读取 ${shortDate(summary.selection.start)} → ${shortDate(summary.selection.end)} 的已筛选特征。`
+        : "默认读取第 2 页已经处理好的特征；若你应用过筛选，会优先使用筛选后的版本。",
+    },
+    {
+      step: "2",
+      title: selectedModel === "rule_based" ? "直接读状态名" : "先解码状态名",
+      copy: selectedModel === "rule_based"
+        ? "规则模型的状态名本身就有宏观含义，直接对照下方词典即可。"
+        : `${summary.latest_regime || `${selectedModel}_state_n`} 只是编号，要先看画像，再给它起研究标签。`,
+    },
+    {
+      step: "3",
+      title: "最后看置信度和连续性",
+      copy: modelMatchesLatestResult
+        ? regimeConfidenceMeaning(selectedModel, summary.latest_confidence)
+        : regimeConfidenceMeaning(selectedModel, null),
+    },
+  ];
+  const pendingNote = summaryModel && summaryModel !== selectedModel
+    ? `<div class="workspace-note"><strong>当前选择还没运行</strong><br />你现在选的是 ${regimeModelDisplay(selectedModel)}，但结果区仍然显示 ${regimeModelDisplay(summaryModel)} 的输出。重新点击“执行状态识别”后，这些解释会跟着切换。</div>`
+    : "";
+
+  container.innerHTML = `
+    <div class="teaching-stack">
+      <div class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Teaching Mode</p><h3>三种状态识别方法怎么选</h3></div>
+          <span class="mono-chip">点击卡片可直接切换模型</span>
+        </div>
+        <div class="model-guide-grid">
+          ${Object.entries(REGIME_MODEL_GUIDES).map(([modelName, item]) => `
+            <button type="button" class="model-guide-card ${modelName === selectedModel ? "is-active" : ""}" data-regime-model="${modelName}">
+              <div class="model-guide-head">
+                <div>
+                  <span class="model-guide-kicker">${item.label}</span>
+                  <span class="model-guide-title">${item.title}</span>
+                </div>
+                <span class="model-guide-tag">${item.tag}</span>
+              </div>
+              <p class="model-guide-copy">${item.summary}</p>
+              <div class="model-guide-points">
+                <div class="model-guide-point"><strong>适用场景</strong>${item.whenToUse}</div>
+                <div class="model-guide-point"><strong>结果解读</strong>${item.resultRead}</div>
+              </div>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+
+      <div class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">Active Model</p><h3>${guide.title} 的读图方式</h3></div>
+          <span class="mono-chip">${guide.tag}</span>
+        </div>
+        <div class="model-guide-points">
+          <div class="model-guide-point"><strong>这一步在做什么</strong>${guide.summary}</div>
+          <div class="model-guide-point"><strong>什么时候最有用</strong>${guide.whenToUse}</div>
+          <div class="model-guide-point"><strong>结果重点看哪里</strong>${guide.resultRead}</div>
+          <div class="model-guide-point"><strong>参数注意点</strong>${guide.parameterNote}</div>
+          <div class="model-guide-point"><strong>当前状态的直观解释</strong>${stateInfo.title} · ${stateInfo.description}</div>
+        </div>
+        ${pendingNote}
+      </div>
+
+      <div class="spotlight-section">
+        <div class="group-head">
+          <div><p class="eyebrow">How To Read</p><h3>第一次看结果时，按这 3 步走</h3></div>
+        </div>
+        <div class="lesson-grid">
+          ${lessons.map((lesson) => `
+            <div class="lesson-card">
+              <span class="lesson-step">${lesson.step}</span>
+              <strong>${lesson.title}</strong>
+              <p>${lesson.copy}</p>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      ${selectedModel === "rule_based" ? buildRuleBasedLegend(summary) : buildClusterLegend(summary, rows, selectedModel)}
+    </div>
+  `;
+}
+
+function syncRegimeTeachingUI() {
+  renderRegimeParameterHelp(researchState.regimeSummary || {});
+  renderRegimeTeaching(researchState.regimeSummary || {}, researchState.regimeRows || []);
+  renderRegimeNotes(researchState.regimeSummary || {}, researchState.regimeRows || []);
+}
+
 // ============================================================
 // REGIME STAGE
 // ============================================================
@@ -1994,20 +2462,27 @@ async function runRegimeStage() {
 
 async function renderRegime(runId) {
   const payload = await api.getStage(runId, "regime");
-  setRegimeStatus(buildStageStatus(payload, "regime"));
-  document.getElementById("regime-log").textContent = payload.log || "";
-  renderRegimeRibbon(payload.summary || {});
-  renderRegimeSummary(payload.summary || {});
-  renderRegimeNotes(payload.summary || {});
+  const summary = payload.summary || {};
+  let rows = [];
   if (payload.status === "success") {
     const artifact = await safeGetArtifact(runId, "regime", "regime");
-    renderRegimeWorkbench(payload.summary || {}, artifact?.rows || payload.preview?.regime || []);
+    rows = artifact?.rows || payload.preview?.regime || [];
+  }
+  researchState.regimeSummary = summary;
+  researchState.regimeRows = rows;
+  setRegimeStatus(buildStageStatus(payload, "regime"));
+  document.getElementById("regime-log").textContent = payload.log || "";
+  renderRegimeRibbon(summary);
+  renderRegimeSummary(summary);
+  syncRegimeTeachingUI();
+  if (payload.status === "success") {
+    renderRegimeWorkbench(summary, rows);
     document.getElementById("regime-handoff-bar")?.classList.remove("hidden");
     updateTabBadge("regime-page", "success");
     return;
   }
   destroyResearchChart("regimeChart");
-  renderRegimeWorkbench(payload.summary || {}, []);
+  renderRegimeWorkbench(summary, []);
   document.getElementById("regime-handoff-bar")?.classList.add("hidden");
   updateTabBadge("regime-page", payload.status);
 }
@@ -2019,24 +2494,25 @@ function renderRegimeRibbon(summary) {
     container.innerHTML = `<div class="hint-box">这里会显示信号类型、拟合窗口和当前状态的摘要。</div>`;
     return;
   }
+  const stateInfo = regimeStateInfo(summary.latest_regime, summary.model_name);
   const cards = [
     {
-      label: "Signal Kind",
+      label: "信号类型",
       value: summary.signal_kind === "state" ? "State Signal" : (summary.signal_kind || "-"),
-      meta: `当前模型 ${summary.model_name || "-"}`,
+      meta: `当前模型 ${regimeModelDisplay(summary.model_name)}`,
     },
     {
-      label: "Fit Window",
+      label: "拟合窗口",
       value: `${shortDate(summary.fit_window?.start)} → ${shortDate(summary.fit_window?.end)}`,
       meta: `${summary.input_rows ?? "-"} 期输入`,
     },
     {
-      label: "Latest State",
-      value: summary.latest_regime || "-",
+      label: "最新状态",
+      value: stateInfo.title,
       meta: `置信度 ${formatPct(summary.latest_confidence)}`,
     },
     {
-      label: "Feature Set",
+      label: "特征集",
       value: `${summary.input_feature_count ?? 0} 列`,
       meta: summary.selection?.feature_columns?.length ? `继承第 2 页筛选 ${summary.selection.feature_columns.length} 列` : "未单独筛选时使用全部处理后特征",
     },
@@ -2057,65 +2533,122 @@ function renderRegimeSummary(summary) {
     return;
   }
   const counts = summary.counts || {};
-  const countCards = Object.entries(counts).map(([regime, count]) => `
+  const totalCount = regimeCountsTotal(counts);
+  const stateInfo = regimeStateInfo(summary.latest_regime, summary.model_name);
+  const countCards = Object.entries(counts)
+    .sort((left, right) => Number(right[1] || 0) - Number(left[1] || 0))
+    .slice(0, 6)
+    .map(([regime, count]) => {
+      const info = regimeStateInfo(regime, summary.model_name);
+      return `
     <div class="metric-card">
-      <div class="metric-label">状态 · ${regime}</div>
-      <div class="metric-value">${count} 期</div>
+      <div class="metric-label">状态分布</div>
+      <div class="metric-value">${info.title}</div>
+      <div class="inline-note">${regime} · ${count} 期 · 占比 ${regimeShare(count, totalCount)}</div>
     </div>
-  `).join("");
+  `;
+    }).join("");
   const selectionCard = summary.selection ? `
     <div class="metric-card">
       <div class="metric-label">输入区间</div>
       <div class="metric-value">${shortDate(summary.selection.start)} ~ ${shortDate(summary.selection.end)}</div>
+      <div class="inline-note">来自第 2 页已应用的 handoff 窗口</div>
     </div>
   ` : "";
   container.innerHTML = `
     <div class="metric-card">
       <div class="metric-label">当前状态</div>
-      <div class="metric-value">${summary.latest_regime ?? "-"}</div>
+      <div class="metric-value">${stateInfo.title}</div>
+      <div class="inline-note">${summary.latest_regime ?? "-"} · ${stateInfo.description}</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">置信度</div>
       <div class="metric-value">${summary.latest_confidence != null ? (summary.latest_confidence * 100).toFixed(1) + "%" : "-"}</div>
+      <div class="inline-note">${regimeConfidenceMeaning(summary.model_name, summary.latest_confidence)}</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">模型</div>
-      <div class="metric-value">${summary.model_name ?? "-"}</div>
+      <div class="metric-value">${regimeModelDisplay(summary.model_name)}</div>
+      <div class="inline-note">${regimeGuide(summary.model_name).stateNote}</div>
     </div>
     <div class="metric-card">
       <div class="metric-label">输入特征</div>
       <div class="metric-value">${summary.input_feature_count ?? "-"} 列 · ${summary.input_rows ?? "-"} 期</div>
+      <div class="inline-note">${summary.selection?.feature_columns?.length ? `本次只读取第 2 页筛过的 ${summary.selection.feature_columns.length} 列。` : "未单独筛选时，会读取全部处理后特征。"}</div>
     </div>
     ${selectionCard}
     ${countCards}
   `;
 }
 
-function renderRegimeNotes(summary) {
+function renderRegimeNotes(summary, rows = researchState.regimeRows || []) {
   const container = document.getElementById("regime-notes");
   if (!container) return;
+  const selectedModel = currentRegimeModel();
+  const selectedGuide = regimeGuide(selectedModel);
   if (!summary || !Object.keys(summary).length || summary.error) {
-    container.innerHTML = `<div class="hint-box">这里会显示当前信号层使用的输入、状态空间和下游接续说明。</div>`;
+    container.innerHTML = `
+      <div class="spotlight-section">
+        <div class="group-head"><div><p class="eyebrow">Signal Lab</p><h3>运行前提示</h3></div></div>
+        <div class="spotlight-list">
+          <div class="spotlight-row">
+            <div>
+              <strong>当前选择</strong>
+              <p>${regimeModelDisplay(selectedModel)}</p>
+            </div>
+            <div class="spotlight-meta"><span>${selectedGuide.tag}</span></div>
+          </div>
+          <div class="spotlight-row">
+            <div>
+              <strong>建议读法</strong>
+              <p>${selectedGuide.resultRead}</p>
+            </div>
+            <div class="spotlight-meta"><span>教学模式</span></div>
+          </div>
+          <div class="spotlight-row">
+            <div>
+              <strong>执行后会得到什么</strong>
+              <p>最新状态、置信度、状态分布和最近 60 期信号路径。</p>
+            </div>
+            <div class="spotlight-meta"><span>结果区待生成</span></div>
+          </div>
+        </div>
+        <div class="workspace-note" style="margin-top:12px"><strong>下游说明</strong><br />第 4 页会消费这里最新一期的状态信号，所以第 3 页最重要的是让状态定义可解释、可复核。</div>
+      </div>
+    `;
     return;
   }
+  const summaryModel = summary.model_name || selectedModel;
+  const stateInfo = regimeStateInfo(summary.latest_regime, summaryModel);
   const featurePreview = (summary.feature_columns || []).slice(0, 8).join(", ");
+  const pendingCopy = summary.model_name && summary.model_name !== selectedModel
+    ? `当前表单已经改成 ${regimeModelDisplay(selectedModel)}，但结果区仍显示 ${regimeModelDisplay(summary.model_name)}。`
+    : "当前表单选择和结果区已经同步。";
+  const profileCount = rows.length ? `${Object.keys(summary.counts || {}).length} 个状态` : "等待生成画像";
   container.innerHTML = `
     <div class="spotlight-section">
-      <div class="group-head"><div><p class="eyebrow">Signal Lab</p><h3>研究说明</h3></div></div>
+      <div class="group-head"><div><p class="eyebrow">Signal Lab</p><h3>结果说明</h3></div></div>
       <div class="spotlight-list">
         <div class="spotlight-row">
           <div>
-            <strong>输入窗口</strong>
-            <p>${shortDate(summary.fit_window?.start)} → ${shortDate(summary.fit_window?.end)}</p>
+            <strong>当前模型</strong>
+            <p>${regimeModelDisplay(summaryModel)}</p>
           </div>
           <div class="spotlight-meta"><span>${summary.input_rows ?? "-"} 期</span></div>
         </div>
         <div class="spotlight-row">
           <div>
-            <strong>状态空间</strong>
-            <p>${(summary.state_labels || []).join(" · ") || "待生成"}</p>
+            <strong>当前状态怎么读</strong>
+            <p>${stateInfo.title} · ${stateInfo.description}</p>
           </div>
-          <div class="spotlight-meta"><span>${Object.keys(summary.counts || {}).length} 个状态</span></div>
+          <div class="spotlight-meta"><span>${formatPct(summary.latest_confidence)}</span></div>
+        </div>
+        <div class="spotlight-row">
+          <div>
+            <strong>状态空间与画像</strong>
+            <p>${(summary.state_labels || []).slice(0, 6).join(" · ") || "待生成"}</p>
+          </div>
+          <div class="spotlight-meta"><span>${profileCount}</span></div>
         </div>
         <div class="spotlight-row">
           <div>
@@ -2125,7 +2658,7 @@ function renderRegimeNotes(summary) {
           <div class="spotlight-meta"><span>${summary.input_feature_count ?? 0} 列</span></div>
         </div>
       </div>
-      <div class="workspace-note" style="margin-top:12px"><strong>下游说明</strong><br />第 4 页当前会读取这里最新一期的状态信号，并在组合构建后叠加风险层。</div>
+      <div class="workspace-note" style="margin-top:12px"><strong>界面同步说明</strong><br />${pendingCopy}<br />第 4 页当前会读取这里最新一期的状态信号，并在组合构建后叠加风险层。</div>
     </div>
   `;
 }
@@ -2138,12 +2671,13 @@ function renderRegimeWorkbench(summary, rows) {
     return;
   }
   const recentRows = rows.slice(-8).reverse();
+  const latestInfo = regimeStateInfo(summary.latest_regime, summary.model_name);
   container.innerHTML = `
     <div class="analysis-grid">
       <section class="spotlight-section">
         <div class="group-head">
           <div><p class="eyebrow">Signal Timeline</p><h3>状态路径与置信度</h3></div>
-          <span class="mono-chip">最新状态 ${summary.latest_regime || "-"}</span>
+          <span class="mono-chip">最新状态 ${latestInfo.title}</span>
         </div>
         <div class="analysis-chart-wrap"><canvas id="regime-chart"></canvas></div>
       </section>
@@ -2155,14 +2689,18 @@ function renderRegimeWorkbench(summary, rows) {
           <table>
             <thead><tr><th>日期</th><th>状态</th><th>置信度</th><th>State ID</th></tr></thead>
             <tbody>
-              ${recentRows.map((row) => `
-                <tr>
-                  <td>${shortDate(row.date)}</td>
-                  <td>${row.portfolio_regime || row.state_label || "-"}</td>
-                  <td>${formatPct(row.regime_confidence)}</td>
-                  <td>${row.state_id ?? "-"}</td>
-                </tr>
-              `).join("")}
+              ${recentRows.map((row) => {
+                const rowState = row.portfolio_regime || row.state_label || "-";
+                const rowInfo = regimeStateInfo(rowState, summary.model_name);
+                return `
+                  <tr>
+                    <td>${shortDate(row.date)}</td>
+                    <td>${rowInfo.title}<div class="inline-note">${rowState}</div></td>
+                    <td>${formatPct(row.regime_confidence)}</td>
+                    <td>${row.state_id ?? "-"}</td>
+                  </tr>
+                `;
+              }).join("")}
             </tbody>
           </table>
         </div>
@@ -2218,6 +2756,24 @@ function renderRegimeWorkbench(summary, rows) {
 // Shared payload builder for policy and backtest (fields only differ by element-id prefix)
 function collectPortfolioPayload(prefix) {
   const portfolioModel = document.getElementById(`${prefix}-portfolio-model`)?.value || "cvar";
+  // Read PolicyConfig advanced params if present
+  const policyConfig = {};
+  const advFields = [
+    ["btc-max-weight", "btc_max_weight", 0.01],
+    ["oil-max-weight", "oil_max_weight", 0.01],
+    ["country-equity-cap", "country_equity_cap", 0.01],
+    ["max-weight-default", "max_weight_default", 0.01],
+    ["turnover-penalty", "turnover_penalty", 1.0],
+    ["confidence-blend", "confidence_blend", 1.0],
+    ["cvar-alpha", "cvar_alpha", 0.01],
+    ["min-trade-weight", "min_trade_weight", 0.01],
+  ];
+  for (const [htmlField, pyField, scale] of advFields) {
+    const el = document.getElementById(`${prefix}-${htmlField}`);
+    if (el?.value !== undefined && el.value !== "") {
+      policyConfig[pyField] = Number(el.value) * scale;
+    }
+  }
   return {
     model_name: portfolioModel,
     portfolio_model: portfolioModel,
@@ -2225,7 +2781,7 @@ function collectPortfolioPayload(prefix) {
     execution_model: "immediate",
     training_window: Number(document.getElementById(`${prefix}-training-window`)?.value || 60),
     transaction_cost_bps: Number(document.getElementById(`${prefix}-transaction-cost`)?.value || 5),
-    overrides: {},
+    overrides: Object.keys(policyConfig).length ? { policy_config: policyConfig } : {},
   };
 }
 
@@ -2473,16 +3029,22 @@ async function renderBacktest(runId) {
   renderBacktestSummary(payload.summary || {});
   renderBacktestNotes(payload.summary || {});
   if (payload.status === "success") {
-    const [navArtifact, benchmarkArtifact] = await Promise.all([
+    const [navArtifact, benchmarkArtifact, weightsArtifact] = await Promise.all([
       safeGetArtifact(runId, "backtest", "nav"),
       safeGetArtifact(runId, "backtest", "benchmarks"),
+      safeGetArtifact(runId, "backtest", "weights"),
     ]);
-    renderBacktestWorkbench(payload.summary || {}, navArtifact?.rows || [], benchmarkArtifact?.rows || []);
+    const navRows = navArtifact?.rows || [];
+    renderBacktestWorkbench(payload.summary || {}, navRows, benchmarkArtifact?.rows || []);
+    renderDrawdownChart(navRows);
+    renderWeightHistoryChart(weightsArtifact?.rows || []);
+    renderRegimePerfBreakdown(payload.summary?.regime_metrics);
     updateTabBadge("backtest-page", "success");
     return;
   }
   destroyResearchChart("backtestChart");
   renderBacktestWorkbench(payload.summary || {}, [], []);
+  renderRegimePerfBreakdown(null);
   updateTabBadge("backtest-page", payload.status);
 }
 
@@ -3113,6 +3675,235 @@ function clamp(value, min, max) {
 
 function slugify(value) {
   return String(value).toLowerCase().replace(/\s+/g, "-").replace(/[^\w\u4e00-\u9fa5-]/g, "");
+}
+
+// ============================================================
+// RESEARCH: PER-REGIME PERFORMANCE BREAKDOWN
+// ============================================================
+function renderRegimePerfBreakdown(regimeMetrics) {
+  const container = document.getElementById("regime-perf-section");
+  if (!container) return;
+  if (!regimeMetrics || !Object.keys(regimeMetrics).length) {
+    container.innerHTML = `<div class="hint-box">执行回测后，这里会显示各宏观状态下的绩效分解。</div>`;
+    return;
+  }
+  const colPct = (v) => (v == null || !Number.isFinite(Number(v)) ? "-" : `${(Number(v) * 100).toFixed(2)}%`);
+  const colRatio = (v) => (v == null || !Number.isFinite(Number(v)) ? "-" : Number(v).toFixed(2));
+  const rows = Object.entries(regimeMetrics)
+    .sort((a, b) => (b[1].months || 0) - (a[1].months || 0))
+    .map(([state, m]) => {
+      const sharpeColor = Number(m.sharpe) >= 1 ? "var(--green)" : Number(m.sharpe) >= 0 ? "var(--text)" : "var(--red, #b54a3f)";
+      const cagrColor = Number(m.cagr) >= 0 ? "var(--green)" : "var(--red, #b54a3f)";
+      return `
+        <tr>
+          <td><strong>${state}</strong></td>
+          <td style="color:${cagrColor}">${colPct(m.cagr)}</td>
+          <td>${colPct(m.annualized_vol)}</td>
+          <td style="color:${sharpeColor}">${colRatio(m.sharpe)}</td>
+          <td>${colPct(m.max_drawdown)}</td>
+          <td>${m.months ?? "-"}</td>
+          <td>${colPct(m.avg_monthly_return)}</td>
+          <td class="inline-note">${colPct(m.avg_transaction_cost)}</td>
+        </tr>`;
+    }).join("");
+  container.innerHTML = `
+    <div class="spotlight-section">
+      <div class="group-head">
+        <div><p class="eyebrow">Signal Validation</p><h3>各宏观状态下的策略绩效分解</h3></div>
+        <span class="mono-chip">Per-Regime Analysis</span>
+      </div>
+      <div class="workspace-note" style="margin-bottom:10px">
+        <strong>研究提示</strong><br />
+        各状态 Sharpe 差异越大，说明宏观信号的区分能力越强。若某状态 Sharpe 显著为负，需要重新检查该状态的模板权重或识别标准。
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>状态</th><th>CAGR</th><th>Vol</th><th>Sharpe</th><th>MaxDD</th><th>月数</th><th>月均收益</th><th>月均成本</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// RESEARCH: DRAWDOWN CHART
+// ============================================================
+function renderDrawdownChart(navRows) {
+  // Clean up old chart
+  if (researchState.drawdownChart) { researchState.drawdownChart.destroy(); researchState.drawdownChart = null; }
+  const container = document.getElementById("regime-perf-section");
+  if (!navRows.length || !container) return;
+
+  // Ensure drawdown canvas exists inside the section
+  let drawdownSection = document.getElementById("drawdown-chart-section");
+  if (!drawdownSection) {
+    drawdownSection = document.createElement("div");
+    drawdownSection.id = "drawdown-chart-section";
+    drawdownSection.className = "spotlight-section";
+    drawdownSection.innerHTML = `
+      <div class="group-head">
+        <div><p class="eyebrow">Risk Analysis</p><h3>最大回撤路径</h3></div>
+      </div>
+      <div class="analysis-chart-wrap"><canvas id="drawdown-canvas"></canvas></div>
+    `;
+    container.after(drawdownSection);
+  }
+
+  const navValues = navRows.map((r) => Number(r.nav || 0));
+  const labels = navRows.map((r) => shortDate(r.date || r.index));
+  let peak = navValues[0] || 1;
+  const drawdownData = navValues.map((nav) => {
+    if (nav > peak) peak = nav;
+    return peak > 0 ? (nav / peak - 1) : 0;
+  });
+
+  const canvas = document.getElementById("drawdown-canvas");
+  if (!canvas || typeof Chart === "undefined") return;
+  researchState.drawdownChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Drawdown",
+        data: drawdownData,
+        borderColor: "rgba(181, 74, 63, 0.85)",
+        backgroundColor: "rgba(181, 74, 63, 0.18)",
+        fill: true,
+        pointRadius: 0,
+        tension: 0.15,
+        borderWidth: 1.5,
+      }],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { grid: { display: false } },
+        y: { ticks: { callback: (v) => `${(v * 100).toFixed(1)}%` } },
+      },
+    },
+  });
+}
+
+// ============================================================
+// RESEARCH: WEIGHT HISTORY CHART (stacked area)
+// ============================================================
+function renderWeightHistoryChart(weightsRows) {
+  if (researchState.weightHistoryChart) { researchState.weightHistoryChart.destroy(); researchState.weightHistoryChart = null; }
+  if (!weightsRows.length) return;
+
+  let section = document.getElementById("weight-history-section");
+  if (!section) {
+    section = document.createElement("div");
+    section.id = "weight-history-section";
+    section.className = "spotlight-section";
+    section.innerHTML = `
+      <div class="group-head">
+        <div><p class="eyebrow">Portfolio Evolution</p><h3>权重历史演变</h3></div>
+        <span class="mono-chip">Walk-Forward Weights</span>
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin:4px 0 8px">每个时间点的资产配置权重，反映策略随宏观状态变化的仓位演变。</p>
+      <div class="analysis-chart-wrap"><canvas id="weight-history-canvas"></canvas></div>
+    `;
+    const drawdownSection = document.getElementById("drawdown-chart-section");
+    if (drawdownSection) drawdownSection.after(section);
+    else document.getElementById("regime-perf-section")?.after(section);
+  }
+
+  const assetCols = Object.keys(weightsRows[0]).filter((k) => k !== "date" && k !== "index" && k !== "Unnamed: 0");
+  const labels = weightsRows.map((r) => shortDate(r.date || r.index));
+  const ASSET_PALETTE = ["#145a41", "#1c4ea0", "#b54a3f", "#9a6b14", "#5d2f86", "#127d8a", "#6d7c1d", "#2d6b8a", "#8a2d6d"];
+  const datasets = assetCols.map((asset, i) => ({
+    label: asset,
+    data: weightsRows.map((r) => Number(r[asset] || 0)),
+    backgroundColor: ASSET_PALETTE[i % ASSET_PALETTE.length] + "bb",
+    borderColor: ASSET_PALETTE[i % ASSET_PALETTE.length],
+    borderWidth: 1,
+    fill: true,
+    tension: 0.1,
+    pointRadius: 0,
+  }));
+
+  const canvas = document.getElementById("weight-history-canvas");
+  if (!canvas || typeof Chart === "undefined") return;
+  researchState.weightHistoryChart = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${formatPct(ctx.raw)}` } },
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: { stacked: true, min: 0, max: 1, ticks: { callback: (v) => `${Math.round(v * 100)}%` } },
+      },
+    },
+  });
+}
+
+// ============================================================
+// RESEARCH: MULTI-RUN COMPARE TABLE
+// ============================================================
+function renderCompareResult(items) {
+  const container = document.getElementById("compare-result");
+  if (!container) return;
+  if (!items?.length) { container.innerHTML = `<div class="hint-box">没有可供对比的回测结果。</div>`; return; }
+
+  const colPct = (v) => (v == null || !Number.isFinite(Number(v)) ? "-" : `${(Number(v) * 100).toFixed(2)}%`);
+  const colRatio = (v) => (v == null || !Number.isFinite(Number(v)) ? "-" : Number(v).toFixed(2));
+
+  const configCols = items.some((r) => Object.keys(r.policy_config_overrides || {}).length);
+  const overrideKeys = [...new Set(items.flatMap((r) => Object.keys(r.policy_config_overrides || {})))];
+
+  const rows = items.map((r) => {
+    const m = r.metrics || {};
+    const sharpeColor = Number(m.sharpe) >= 1 ? "var(--green)" : Number(m.sharpe) >= 0 ? "var(--text)" : "var(--red,#b54a3f)";
+    const cagrColor = Number(m.cagr) >= 0 ? "var(--green)" : "var(--red,#b54a3f)";
+    const configCells = overrideKeys.map((k) => {
+      const v = r.policy_config_overrides?.[k];
+      return `<td class="inline-note">${v != null ? Number(v).toFixed(4) : "-"}</td>`;
+    }).join("");
+    return `
+      <tr>
+        <td><strong>${r.label || r.run_id?.slice(0, 8)}</strong><div class="inline-note">${r.portfolio_model || "-"} + ${r.risk_model || "-"}</div></td>
+        <td>${r.training_window ?? "-"}</td>
+        <td>${r.transaction_cost_bps ?? "-"} bps</td>
+        <td style="color:${cagrColor}">${colPct(m.cagr)}</td>
+        <td>${colPct(m.annualized_vol)}</td>
+        <td style="color:${sharpeColor}">${colRatio(m.sharpe)}</td>
+        <td>${colRatio(m.sortino)}</td>
+        <td>${colPct(m.max_drawdown)}</td>
+        <td>${colPct(m.cvar_95)}</td>
+        <td>${colRatio(m.calmar)}</td>
+        <td>${r.nav_rows ?? "-"}</td>
+        ${configCells}
+      </tr>`;
+  }).join("");
+
+  const configHeaders = overrideKeys.map((k) => `<th class="inline-note">${k}</th>`).join("");
+  container.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run / 策略</th><th>训练窗口</th><th>成本</th><th>CAGR</th><th>Vol</th><th>Sharpe</th><th>Sortino</th><th>MaxDD</th><th>CVaR</th><th>Calmar</th><th>样本期</th>
+            ${configHeaders}
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin-top:8px">表格中的 PolicyConfig 列仅在调整高级参数后才会出现。同样的市场数据 + 不同参数 = 控制变量对比实验。</p>
+  `;
 }
 
 init();

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import subprocess
 import math
+from typing import Any
 import pandas as pd
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +52,72 @@ def create_run(request: RunCreateRequest):
 @app.get("/api/runs")
 def list_runs():
     return {"items": run_store.list_runs()}
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str):
+    run_dir = run_store.run_dir(run_id)
+    if not run_dir.exists():
+        raise HTTPException(status_code=404, detail="Run not found")
+    shutil.rmtree(run_dir)
+    return {"ok": True, "deleted": run_id}
+
+
+@app.patch("/api/runs/{run_id}")
+def update_run_label(run_id: str, body: dict[str, Any]):
+    try:
+        metadata = run_store.load_metadata(run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Run not found") from exc
+    label = body.get("label")
+    if label is not None:
+        metadata["label"] = str(label).strip()
+        import json
+        (run_store.run_dir(run_id) / "run.json").write_text(json.dumps(metadata, indent=2))
+    return metadata
+
+
+@app.get("/api/compare/backtest")
+def compare_backtest_runs(run_ids: str = Query(..., description="comma-separated run IDs")):
+    """Return a side-by-side comparison of backtest metrics for multiple runs."""
+    ids = [rid.strip() for rid in run_ids.split(",") if rid.strip()]
+    results: list[dict] = []
+    for rid in ids:
+        try:
+            payload = pipeline.get_stage_payload(rid, "backtest")
+        except Exception:
+            results.append({"run_id": rid, "status": "not_found"})
+            continue
+        summary = payload.get("summary") or {}
+        metrics = summary.get("metrics") or {}
+        try:
+            meta = run_store.load_metadata(rid)
+            label = meta.get("label") or rid[:8]
+        except Exception:
+            label = rid[:8]
+        results.append({
+            "run_id": rid,
+            "label": label,
+            "status": payload.get("status", "unknown"),
+            "portfolio_model": summary.get("portfolio_model"),
+            "risk_model": summary.get("risk_model"),
+            "training_window": summary.get("training_window"),
+            "transaction_cost_bps": summary.get("transaction_cost_bps"),
+            "policy_config_overrides": summary.get("policy_config_overrides", {}),
+            "metrics": {
+                "cagr": metrics.get("cagr"),
+                "annualized_vol": metrics.get("annualized_vol"),
+                "sharpe": metrics.get("sharpe"),
+                "sortino": metrics.get("sortino"),
+                "max_drawdown": metrics.get("max_drawdown"),
+                "cvar_95": metrics.get("cvar_95"),
+                "calmar": metrics.get("calmar"),
+            },
+            "regime_metrics": summary.get("regime_metrics"),
+            "nav_rows": summary.get("nav_rows"),
+            "latest_nav": summary.get("latest_nav"),
+        })
+    return {"items": results}
 
 
 @app.get("/api/providers/config")

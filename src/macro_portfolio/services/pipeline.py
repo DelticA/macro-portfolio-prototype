@@ -356,7 +356,10 @@ class PipelineService:
                 "portfolio_model": portfolio_model_name,
                 "risk_model": request.risk_model,
                 "execution_model": request.execution_model,
-                "metrics": {key: float(value) for key, value in result.metrics.to_dict().items()},
+                "training_window": request.training_window,
+                "transaction_cost_bps": request.transaction_cost_bps,
+                "metrics": {key: float(value) for key, value in result.metrics.to_dict().items() if key != "regime_metrics"},
+                "regime_metrics": result.metrics.get("regime_metrics") if hasattr(result.metrics, "get") else result.metrics.to_dict().get("regime_metrics"),
                 "nav_rows": int(len(result.nav)),
                 "latest_nav": float(result.nav.iloc[-1]) if not result.nav.empty else None,
                 "latest_weights": (
@@ -367,6 +370,7 @@ class PipelineService:
                 "tradable_universe": [asset.asset for asset in DEFAULT_ASSETS],
                 "portfolio_diagnostics": portfolio_model.diagnostics().details,
                 "risk_diagnostics": risk_model.diagnostics().details,
+                "policy_config_overrides": request.overrides.get("policy_config", {}),
             }
             if selection:
                 summary["selection"] = selection
