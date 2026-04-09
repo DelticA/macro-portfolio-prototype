@@ -643,9 +643,11 @@ class PipelineService:
             if column == "USDCNY":
                 frame[column] = 1 / frame[column]
             return frame
-        frame = StooqClient().fetch_close_prices({column: DEFAULT_STOOQ_SYMBOLS[column]}).resample("ME").last()
-        frame = frame.loc[frame.index >= pd.Timestamp(request.start_date)]
-        frame = frame.loc[frame.index <= pd.Timestamp(request.end_date)]
+        # Default / stooq: fall back to Yahoo Finance (Stooq now requires CAPTCHA API keys)
+        symbol = "CNY=X" if column == "USDCNY" else (column if column != "BTC" else "BTC-USD")
+        frame = YahooFinanceClient().fetch_close_prices({column: symbol}, start_date=request.start_date, end_date=request.end_date, interval="1mo").resample("ME").last()
+        if column == "USDCNY":
+            frame[column] = 1 / frame[column]
         return frame
 
     def _fetch_cn_asset_item(self, column: str, request: ProvidersRequest) -> pd.DataFrame:

@@ -257,6 +257,9 @@ const api = {
   async compareBacktest(runIds) {
     return handle(await fetch(`/api/compare/backtest?run_ids=${encodeURIComponent(runIds.join(","))}`))
   },
+  async getOpenBBStatus() { return handle(await fetch('/api/openbb/status')); },
+  async toggleOpenBB() { return handle(await fetch('/api/openbb/toggle', { method: "POST" })); },
+  async installOpenBB() { return handle(await fetch('/api/openbb/install', { method: "POST" })); },
 };
 
 // ============================================================
@@ -273,6 +276,7 @@ async function init() {
   }
   await loadProvidersConfig();
   await refreshRuns();
+  await renderOpenBBWidget();
 }
 
 function bindTabs() {
@@ -444,6 +448,64 @@ async function refreshRuns(selectedId = null) {
 }
 
 function currentRunId() { return document.getElementById("run-select").value; }
+
+async function renderOpenBBWidget() {
+  const container = document.getElementById("openbb-widget-container");
+  if (!container) return;
+  try {
+    const status = await api.getOpenBBStatus();
+    let innerHtml = "";
+    if (!status.installed) {
+      innerHtml = `
+        <label>高级集成 (OpenBB)</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span class="mono-chip" style="color:var(--muted)">未安装</span>
+          <button type="button" class="secondary-button" id="btn-install-openbb" style="padding:4px 10px; font-size:12px;">自动安装并启动</button>
+        </div>
+      `;
+    } else {
+      const stateText = status.enabled ? "已启用 (接管取数)" : "已休眠 (回退至基础源)";
+      const stateColor = status.enabled ? "var(--brand)" : "var(--muted)";
+      const btnAction = status.enabled ? "临时禁用" : "重新启用";
+      innerHtml = `
+        <label>高级集成 (OpenBB)</label>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span class="mono-chip" style="color:${stateColor}; font-weight:600;">${stateText}</span>
+          <button type="button" class="secondary-button" id="btn-toggle-openbb" style="padding:4px 10px; font-size:12px;">${btnAction}</button>
+        </div>
+      `;
+    }
+    container.innerHTML = innerHtml;
+
+    document.getElementById("btn-install-openbb")?.addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = "安装中 (约需1-2分钟)...";
+      try {
+        await api.installOpenBB();
+        showToast("OpenBB 安装成功", "success");
+        await renderOpenBBWidget();
+      } catch (err) {
+        showToast("安装失败: " + err.message, "error");
+        e.target.disabled = false;
+        e.target.textContent = "重新安装";
+      }
+    });
+
+    document.getElementById("btn-toggle-openbb")?.addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      e.target.textContent = "...";
+      try {
+        await api.toggleOpenBB();
+        await renderOpenBBWidget();
+      } catch (err) {
+        showToast("切换失败: " + err.message, "error");
+        e.target.disabled = false;
+      }
+    });
+  } catch (err) {
+    console.warn("Failed to check OpenBB status", err);
+  }
+}
 
 function updateTabBadge(tabId, status) {
   const btn = document.querySelector(`.tab-button[data-tab="${tabId}"]`);

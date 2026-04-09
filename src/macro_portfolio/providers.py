@@ -118,43 +118,68 @@ class YahooFinanceClient:
             start_date = "2000-01-01"
         if end_date is None:
             end_date = date.today().isoformat()
+            
+        try:
+            import yfinance as yf
+            # Map intervals securely
+            yf_interval = "1d" if interval == "1d" else "1mo"
+            frames = {}
+            for alias, symbol in symbol_map.items():
+                df = yf.download(symbol, start=start_date, end=end_date, interval=yf_interval, progress=False, show_errors=False)
+                if not df.empty:
+                    # yf.download might return multiindex columns if multiple symbols, but we download 1 by 1
+                    col = "Adj Close" if "Adj Close" in df.columns else ("Close" if "Close" in df.columns else df.columns[0])
+                    # Ensure series and drop multi-index if 1.2.x uses Tuples
+                    series = df[col].squeeze()
+                    frames[alias] = pd.Series(
+                        series.values,
+                        index=pd.to_datetime(series.index).tz_localize(None),
+                        name=alias,
+                        dtype=float,
+                    )
+            prices = pd.DataFrame(frames).sort_index()
+            return prices[~prices.index.duplicated(keep="last")]
+        except ImportError:
+            # Fallback to the manual URL fetching if yfinance is not installed
+            import time
+            import random
+            start_epoch = _to_epoch(start_date)
+            end_epoch = _to_epoch(end_date)
+            frames = {}
+            user_agents = [
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            ]
+            for i, (alias, symbol) in enumerate(symbol_map.items()):
+                if i > 0:
+                    time.sleep(0.6)
+                params = urlencode({"period1": start_epoch, "period2": end_epoch, "interval": interval, "includeAdjustedClose": "true", "events": "div,splits"})
+                request = Request(f"{self.base_url}/{symbol}?{params}", headers={"User-Agent": self.user_agent, "Accept": "application/json"})
+                for attempt in range(4):
+                    try:
+                        request.add_header("User-Agent", random.choice(user_agents))
+                        payload = _read_json(request)
+                        break
+                    except RuntimeError as exc:
+                        if ("429" in str(exc) or "400" in str(exc) or "403" in str(exc)) and attempt < 3:
+                            time.sleep(5 * (2 ** attempt))
+                        else:
+                            raise
+                result = payload["chart"]["result"][0]
+                timestamps = result.get("timestamp", [])
+                quote = result["indicators"]["quote"][0]
+                adjclose = result["indicators"].get("adjclose", [{}])[0].get("adjclose")
+                closes = adjclose if adjclose is not None else quote["close"]
+                frames[alias] = pd.Series(closes, index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None), name=alias, dtype=float)
+            prices = pd.DataFrame(frames).sort_index()
+            return prices[~prices.index.duplicated(keep="last")]
 
-        start_epoch = _to_epoch(start_date)
-        end_epoch = _to_epoch(end_date)
-        frames: dict[str, pd.Series] = {}
-        for alias, symbol in symbol_map.items():
-            params = urlencode(
-                {
-                    "period1": start_epoch,
-                    "period2": end_epoch,
-                    "interval": interval,
-                    "includeAdjustedClose": "true",
-                    "events": "div,splits",
-                }
-            )
-            request = Request(
-                f"{self.base_url}/{symbol}?{params}",
-                headers={"User-Agent": self.user_agent, "Accept": "application/json"},
-            )
-            payload = _read_json(request)
-            result = payload["chart"]["result"][0]
-            timestamps = result.get("timestamp", [])
-            quote = result["indicators"]["quote"][0]
-            adjclose = result["indicators"].get("adjclose", [{}])[0].get("adjclose")
-            closes = adjclose if adjclose is not None else quote["close"]
-            frames[alias] = pd.Series(
-                closes,
-                index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(None),
-                name=alias,
-                dtype=float,
-            )
-
-        prices = pd.DataFrame(frames).sort_index()
-        return prices[~prices.index.duplicated(keep="last")]
 
 
 class OpenBBClient:
     def __init__(self) -> None:
+        if os.getenv("MACRO_LAB_OPENBB_DISABLED") == "1":
+            raise ImportError("OpenBB is explicitly disabled by the user.")
         try:
             from openbb import obb  # type: ignore
         except ImportError as exc:
@@ -343,19 +368,16 @@ class ResearchDataLoader:
             fx_frame = fx.fetch_series(DEFAULT_FRED_FX_SERIES, start_date=start_date, end_date=end_date)
             prices = prices.join(fx_frame, how="outer")
         else:
-            stooq = self.stooq or StooqClient()
-            prices = stooq.fetch_close_prices(DEFAULT_STOOQ_SYMBOLS)
-            btc = (self.binance or BinanceClient()).fetch_btc_prices(start_date=start_date, end_date=end_date)
-            fx = (self.fred or FredClient()).fetch_series(DEFAULT_FRED_FX_SERIES, start_date=start_date, end_date=end_date)
-            prices = prices.join(btc, how="outer").join(fx, how="outer")
-            prices = prices.loc[prices.index >= pd.Timestamp(start_date)]
-            prices = prices.loc[prices.index <= pd.Timestamp(end_date)]
-            return prices.resample("ME").last()
-        if "USDCNY" not in prices.columns:
+            prices = client.fetch_close_prices(DEFAULT_YAHOO_SYMBOLS, start_date=start_date, end_date=end_date, interval="1d")
             fx = (self.fred or FredClient()).fetch_series(DEFAULT_FRED_FX_SERIES, start_date=start_date, end_date=end_date)
             prices = prices.join(fx, how="outer")
+            
         if "BTC" not in prices.columns:
-            prices = client.fetch_close_prices(DEFAULT_YAHOO_SYMBOLS, start_date=start_date, end_date=end_date)
+            btc = (self.binance or BinanceClient()).fetch_btc_prices(start_date=start_date, end_date=end_date)
+            prices = prices.join(btc, how="outer")
+            
+        prices = prices.loc[prices.index >= pd.Timestamp(start_date)]
+        prices = prices.loc[prices.index <= pd.Timestamp(end_date)]
         return prices.rename(columns={"USDCNY": "USDCNY"}).resample("ME").last()
 
     def load_cn_assets(

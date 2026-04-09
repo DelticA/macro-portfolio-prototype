@@ -148,6 +148,43 @@ def get_run(run_id: str):
         raise HTTPException(status_code=404, detail="Run not found") from exc
 
 
+# ============================================================
+# OpenBB Management
+# ============================================================
+@app.get("/api/openbb/status")
+def get_openbb_status():
+    import importlib.util
+    import os
+    installed = importlib.util.find_spec("openbb") is not None
+    enabled = os.getenv("MACRO_LAB_OPENBB_DISABLED") != "1"
+    return {"installed": installed, "enabled": enabled}
+
+@app.post("/api/openbb/toggle")
+def toggle_openbb():
+    import os
+    current = os.getenv("MACRO_LAB_OPENBB_DISABLED")
+    if current == "1":
+        os.environ["MACRO_LAB_OPENBB_DISABLED"] = "0"
+        enabled = True
+    else:
+        os.environ["MACRO_LAB_OPENBB_DISABLED"] = "1"
+        enabled = False
+    return {"enabled": enabled}
+
+@app.post("/api/openbb/install")
+def install_openbb():
+    import subprocess
+    import sys
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "openbb>=4.7"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return {"success": True}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Install failed: {e.stderr}")
 @app.post("/api/runs/{run_id}/open")
 def open_run_folder(run_id: str, target: str = "run"):
     run_dir = run_store.run_dir(run_id)
