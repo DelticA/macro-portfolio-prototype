@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import math
+import sys
 from typing import Any
 import pandas as pd
 
@@ -28,13 +29,24 @@ from ..providers import get_prefilled_secret_fields
 from ..services.pipeline import PIPELINE_SERVICE_METADATA, PipelineService
 
 
-ROOT = Path(__file__).resolve().parents[3]
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Handle path resolution for both dev environment and PyInstaller executable
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # Running as PyInstaller bundle
+    BUNDLE_DIR = Path(sys._MEIPASS)
+    # Put user data (runs) alongside the .exe, not inside the temp MEIPASS folder
+    ROOT = Path(sys.executable).parent
+    STATIC_DIR = BUNDLE_DIR / "static"
+else:
+    # Running in normal dev environment
+    ROOT = Path(__file__).resolve().parents[3]
+    STATIC_DIR = Path(__file__).resolve().parent / "static"
+
 run_store = RunStore(ROOT / "runs")
 pipeline = PipelineService(run_store)
 
 app = FastAPI(title="Macro Portfolio Lab API", version="0.2.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 
 
 @app.get("/")
